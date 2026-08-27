@@ -1,0 +1,54 @@
+# AsciiWorldEngine.
+#
+# Shaped after the sibling TerminalGB project: one library crate that holds the
+# whole engine, plus real `[[bin]]` targets and feature-gated frontends. The
+# NATIVE terminal binary is the product — `cargo run` and you are walking the
+# city. No node, no browser, no wasm anywhere on that path.
+#
+# The wasm/browser build is an optional extra target off the same core
+# (`--no-default-features --features wasm`), not the foundation.
+
+[package]
+name = "asciicity"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "An ASCII 3D city — world, movement, projection and renderer, all in Rust"
+license-file = "LICENSE"
+authors = ["Aaron Gibson"]
+publish = false
+
+[lib]
+name = "asciicity"
+path = "src/lib.rs"
+# cdylib for the wasm target, rlib so the bins link it, staticlib so the core
+# can be embedded from C the way the sibling project allows.
+crate-type = ["cdylib", "rlib", "staticlib"]
+
+[[bin]]
+name = "asciicity"
+path = "src/bin/asciicity.rs"
+required-features = ["tui"]
+
+[features]
+# The default build is the thing you play: a native terminal binary.
+default = ["tui"]
+# Terminal frontend: raw mode, the kitty keyboard protocol for real key-hold
+# movement, 24-bit ANSI paint. The ONLY thing that pulls in an outside crate,
+# and it pulls in exactly one (libc, for termios + TIOCGWINSZ).
+tui = ["libc"]
+# The browser build. Adds `extern "C"` exports over the same flat frame buffer.
+# Off by default; see build-wasm.sh.
+wasm = []
+
+[dependencies]
+# Core is dependency-free on purpose: `--no-default-features` builds the whole
+# engine — world, camera, projection, renderer — with nothing but the standard
+# library.
+libc = { version = "0.2", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "unwind"

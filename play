@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#
+# One command, from a clean checkout to walking around the city.
+#
+#     ./play                 walk it
+#     ./play --demo          the city walks itself; any key takes over
+#     ./play --help          every flag
+#
+# Anything you pass is handed straight to the binary, so every flag in
+# `./play --help` works here.
+#
+# It does three things and no more: find a Rust toolchain (offering to install
+# one if there is none), build in release, and run. There is no other
+# dependency to fetch — the engine is one crate and the terminal frontend
+# pulls in exactly one, `libc`.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+say() { printf '\033[38;2;52;244;238m%s\033[0m\n' "$*" >&2; }
+die() { printf '\033[38;2;255;96;96m%s\033[0m\n' "$*" >&2; exit 1; }
+
+# --- 1. a Rust toolchain --------------------------------------------------
+if ! command -v cargo >/dev/null 2>&1; then
+  # rustup may be installed but not on this shell's PATH.
+  for env in "${CARGO_HOME:-$HOME/.cargo}/env"; do
+    [ -f "$env" ] && . "$env"
+  done
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+  say "No Rust toolchain found. AsciiWorldEngine needs one (1.75 or newer)."
+  if [ -t 0 ]; then
+    printf 'Install it now with rustup, from https://rustup.rs? [Y/n] ' >&2
+    read -r reply
+    case "${reply:-y}" in
+      [Nn]*) die "Nothing installed. Install Rust yourself and run ./play again." ;;
+    esac
+  elif [ "${ASCIIWORLD_INSTALL_RUST:-}" != "1" ]; then
+    die "Install Rust from https://rustup.rs and run ./play again, or re-run
+with ASCIIWORLD_INSTALL_RUST=1 to let this script install it unattended."
+  fi
+  command -v curl >/dev/null 2>&1 || die "curl is needed to fetch rustup."
+  say "Installing the Rust toolchain (rustup, default profile)..."
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --no-modify-path --profile minimal
+  . "${CARGO_HOME:-$HOME/.cargo}/env"
+fi
+
+command -v cargo >/dev/null 2>&1 || die "cargo still not on PATH; open a new shell and retry."
+
+# --- 2. build -------------------------------------------------------------
+# Quiet unless it actually has work to do, so a second run starts instantly.
+if [ ! -x target/release/asciicity ] || [ -n "$(find src Cargo.toml -newer target/release/asciicity 2>/dev/null | head -1)" ]; then
+  say "Building (first run only; a minute or so)..."
+  cargo build --release
+fi
+
+# --- 3. walk --------------------------------------------------------------
+exec ./target/release/asciicity "$@"

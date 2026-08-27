@@ -1,0 +1,16 @@
+# Example registration list for `asciicity --plates-file`.
+# One registration per line. Blank lines and #-comments are skipped.
+# Entries are folded to upper case; anything a plate cannot carry is dropped.
+#
+# These are made up for the demo. They are not real registrations and are not
+# claimed to belong to anybody.
+AB12 CDE
+K9 PAW
+1 RG
+MR15 TER
+BOSS 1
+GO51 FAR
+NEON 7
+V8 RRR
+LDN 22
+XY24 ZZT

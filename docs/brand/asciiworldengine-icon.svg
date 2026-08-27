@@ -1,0 +1,11 @@
+<!-- AsciiWorldEngine icon — the tower and its neighbours
+     Hand-authored for AsciiWorldEngine.  No font embedded, subset or traced;
+     letterforms are original stroked paths. Regenerate with docs/brand/generate.py -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img">
+<rect x="1" y="1" width="126" height="126" rx="28" fill="#0d1117" stroke="#30363d" stroke-width="2"/>
+<rect x="24" y="64" width="24" height="40" fill="#34f4ee"/>
+<rect x="56" y="40" width="24" height="64" fill="#34f4ee"/>
+<rect x="88" y="56" width="16" height="48" fill="#34f4ee"/>
+<rect x="64" y="24" width="8" height="24" fill="#34f4ee"/>
+<rect x="16" y="104" width="96" height="8" fill="#34f4ee"/>
+</svg>

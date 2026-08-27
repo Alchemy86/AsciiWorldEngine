@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ASCII City - our Rust engine</title>
+<style>
+  :root { color-scheme: dark; }
+  html,body { margin:0; height:100%; background:#020403; color:#b7c8bd;
+              font:13px/1.5 ui-monospace,Consolas,"Courier New",monospace; }
+  #wrap { position:fixed; inset:0; display:grid; grid-template-rows:1fr auto; }
+  #stage { position:relative; overflow:hidden; background:#000; }
+  #view { width:100%; height:100%; display:block; background:#000; cursor:crosshair; }
+  /* The demo's own CSS overlay: a 1px scanline on a 4px pitch and a corner
+     vignette. Presentation, not content - see ARCHITECTURE.md. */
+  #fx { position:absolute; inset:0; z-index:2; pointer-events:none;
+        background:
+          repeating-linear-gradient(0deg, rgba(255,255,255,.012) 0, rgba(255,255,255,.012) 1px, transparent 1px, transparent 4px),
+          radial-gradient(ellipse at center, transparent 58%, rgba(0,0,0,.08) 82%, rgba(0,0,0,.28) 100%); }
+  #hud { padding:6px 10px; background:#08110c; border-top:1px solid #17231c;
+         display:flex; gap:18px; flex-wrap:wrap; align-items:center; }
+  #hud b { color:#6fffab; font-weight:600; }
+  #hud .k { color:#5d7a68; }
+  kbd { background:#12251a; border:1px solid #244432; border-radius:3px; padding:0 4px; color:#9ec; }
+  #splash { position:fixed; inset:0; display:grid; place-items:center; background:#020403;
+            text-align:center; z-index:5; }
+  #splash p { max-width:52ch; color:#7d9488; }
+  #splash button { margin-top:14px; font:inherit; padding:8px 18px; background:#123021;
+                   color:#cfe0d5; border:1px solid #2c6b47; border-radius:5px; cursor:pointer; }
+  #err { color:#ff8080; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage"><canvas id="view"></canvas><div id="fx"></div></div>
+  <div id="hud">
+    <span>pos <b id="pos">-</b></span>
+    <span>grid <b id="grid">-</b> · cells kept <b id="hits">-</b></span>
+    <span>sim <b id="ms">-</b> · render <b id="rms">-</b> · paint <b id="dms">-</b> ms · <b id="fps">-</b> fps</span>
+    <span class="k"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move · mouse look ·
+      <kbd>shift</kbd> run · <kbd>V</kbd> vista · <kbd>E</kbd>/<kbd>C</kbd> rise/sink · <kbd>esc</kbd> release</span>
+  </div>
+</div>
+<div id="splash">
+  <div>
+    <h1 style="margin:0 0 6px">ASCIIWORLDENGINE</h1>
+    <p>The city, the camera, the projection, every glyph and every colour are
+       decided in Rust; this page loads the module, feeds keys and a
+       <code>dt</code> in, and paints the bytes that come back.</p>
+    <p class="k">The native terminal binary is the real front end -
+       <code>cargo run --release</code>. This page is the optional extra target.</p>
+    <p id="err"></p>
+    <button id="go">click to enter</button>
+  </div>
+</div>
+
+<script type="module">
+// The whole JS side. It decides nothing about the picture.
+const WASM = './asciicity.wasm';
+const $ = (id) => document.getElementById(id);
+const canvas = $('view'), ctx = canvas.getContext('2d', { alpha: false });
+
+// The engine's input bitmask (src/camera.rs). This mapping is the only thing
+// this file knows about the engine besides the frame layout.
+const K = { FWD:1, BACK:2, STRAFE_L:4, STRAFE_R:8, TURN_L:16, TURN_R:32,
+            SPRINT:64, LOOK_UP:128, LOOK_DOWN:256, RISE:512, SINK:1024 };
+
+let wasm, mem, ready = false, cols = 180, rows = 80, cellW = 7, cellH = 12, dpr = 1;
+
+function resize() {
+  dpr = Math.min(2, window.devicePixelRatio || 1);
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  // Keep the 180x80 grid and scale the cell to the window, so the projection
+  // matches the picture it was designed for.
+  cellW = w / cols; cellH = h / rows;
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.font = `${(cellH * 1.11).toFixed(2)}px Consolas, "Courier New", ui-monospace, monospace`;
+  ctx.textBaseline = 'alphabetic';
+  if (ready) wasm.ac_resize(cols, rows, cellW, cellH);
+}
+addEventListener('resize', resize);
+
+const keys = new Set();
+let lookX = 0, lookY = 0;
+addEventListener('keydown', (e) => {
+  keys.add(e.code);
+  if (e.code === 'KeyV' && ready) wasm.ac_toggle_vista();
+  if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
+});
+addEventListener('keyup', (e) => keys.delete(e.code));
+addEventListener('blur', () => keys.clear());
+canvas.addEventListener('click', () => canvas.requestPointerLock());
+document.addEventListener('mousemove', (e) => {
+  if (document.pointerLockElement !== canvas) return;
+  lookX += e.movementX * 0.0026;
+  lookY -= e.movementY * 0.0022;
+});
+const bits = () => {
+  let k = 0;
+  if (keys.has('KeyW') || keys.has('ArrowUp')) k |= K.FWD;
+  if (keys.has('KeyS') || keys.has('ArrowDown')) k |= K.BACK;
+  if (keys.has('KeyA')) k |= K.STRAFE_L;
+  if (keys.has('KeyD')) k |= K.STRAFE_R;
+  if (keys.has('ArrowLeft') || keys.has('KeyJ')) k |= K.TURN_L;
+  if (keys.has('ArrowRight') || keys.has('KeyK')) k |= K.TURN_R;
+  if (keys.has('KeyR')) k |= K.LOOK_UP;
+  if (keys.has('KeyF')) k |= K.LOOK_DOWN;
+  if (keys.has('ShiftLeft') || keys.has('ShiftRight')) k |= K.SPRINT;
+  if (keys.has('KeyE') || keys.has('PageUp')) k |= K.RISE;
+  if (keys.has('KeyC') || keys.has('PageDown')) k |= K.SINK;
+  return k;
+};
+
+// Paint. Cells are batched by colour so `fillStyle` changes once per distinct
+// colour per frame instead of once per cell.
+const batches = new Map();
+function paint(buf, bg) {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+  // Registration plates are the one thing in the frame with a background of
+  // its own — black on yellow at the back of a car, black on white at the
+  // front. `bg` is null on any frame that painted none, which is most of them.
+  if (bg) {
+    for (let y = 0; y < rows; y++) {
+      let x = 0;
+      while (x < cols) {
+        const i = (y * cols + x) * 3;
+        if (!(bg[i] | bg[i + 1] | bg[i + 2])) { x++; continue; }
+        const start = x, r = bg[i], g = bg[i + 1], b = bg[i + 2];
+        while (x < cols) {
+          const j = (y * cols + x) * 3;
+          if (bg[j] !== r || bg[j + 1] !== g || bg[j + 2] !== b) break;
+          x++;
+        }
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        ctx.fillRect(start * cellW, y * cellH, (x - start) * cellW, cellH);
+      }
+    }
+  }
+  batches.clear();
+  // A registration is set heavy, the way the native terminal build sets it
+  // with SGR 1 — at one character per cell weight is the only size there is.
+  // The cells that get it are the cells over a panel and nothing else, so it
+  // rides on the same flag the yellow does and the whole branch disappears on
+  // a frame with no plate on it.
+  const heavy = [];
+  for (let i = 0, n = cols * rows; i < n; i++) {
+    const code = buf[i * 4];
+    if (code === 32 || code === 0) continue;
+    if (bg && (bg[i * 3] | bg[i * 3 + 1] | bg[i * 3 + 2])) { heavy.push(i, code); continue; }
+    const key = (buf[i*4+1] << 16) | (buf[i*4+2] << 8) | buf[i*4+3];
+    let arr = batches.get(key);
+    if (!arr) batches.set(key, arr = []);
+    arr.push(i, code);
+  }
+  const draw = (arr) => {
+    for (let j = 0; j < arr.length; j += 2) {
+      const i = arr[j];
+      ctx.fillText(String.fromCharCode(arr[j + 1]),
+        (i % cols) * cellW, ((i / cols | 0) + 1) * cellH - cellH * 0.18);
+    }
+  };
+  for (const [key, arr] of batches) {
+    ctx.fillStyle = '#' + key.toString(16).padStart(6, '0');
+    draw(arr);
+  }
+  if (heavy.length) {
+    ctx.save();
+    ctx.font = '900 ' + ctx.font;
+    ctx.fillStyle = '#000';
+    // Canvas has no font-weight synthesis to fall back on when the monospace
+    // face ships no black weight, so thicken the outline as well — the same
+    // belt and braces the SVG writer uses.
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = Math.max(0.6, cellH * 0.05);
+    for (let j = 0; j < heavy.length; j += 2) {
+      const i = heavy[j], ch = String.fromCharCode(heavy[j + 1]);
+      const x = (i % cols) * cellW, y = ((i / cols | 0) + 1) * cellH - cellH * 0.18;
+      ctx.strokeText(ch, x, y);
+    }
+    draw(heavy);
+    ctx.restore();
+  }
+}
+
+let last = 0, fpsT = 0, fpsN = 0, simA = 0, rndA = 0, drawA = 0;
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.1, (now - last) / 1000 || 0.016);
+  last = now;
+  const t0 = performance.now();
+  wasm.ac_step(dt, bits(), lookX, lookY);
+  lookX = 0; lookY = 0;
+  const t1 = performance.now();
+  wasm.ac_render();
+  const t2 = performance.now();
+  paint(
+    new Uint8Array(mem.buffer, wasm.ac_frame_ptr(), cols * rows * 4),
+    wasm.ac_has_panels() ? new Uint8Array(mem.buffer, wasm.ac_bg_ptr(), cols * rows * 3) : null,
+  );
+  const t3 = performance.now();
+
+  simA += t1 - t0; rndA += t2 - t1; drawA += t3 - t2; fpsN++;
+  if (now - fpsT > 500) {
+    $('pos').textContent = `${wasm.ac_cam_x().toFixed(0)}, ${wasm.ac_cam_z().toFixed(0)}  eye ${wasm.ac_cam_eye().toFixed(1)}`;
+    $('grid').textContent = `${cols}x${rows}`;
+    $('hits').textContent = wasm.ac_hits();
+    $('ms').textContent = (simA / fpsN).toFixed(2);
+    $('rms').textContent = (rndA / fpsN).toFixed(2);
+    $('dms').textContent = (drawA / fpsN).toFixed(2);
+    $('fps').textContent = (fpsN / ((now - fpsT) / 1000)).toFixed(0);
+    fpsT = now; fpsN = 0; simA = rndA = drawA = 0;
+  }
+}
+
+async function boot() {
+  const res = await fetch(WASM);
+  if (!res.ok) throw new Error(`fetch ${WASM}: ${res.status} - run ./build-wasm.sh, then python3 tools/serve.py`);
+  const { instance } = await WebAssembly.instantiate(await res.arrayBuffer(), {});
+  wasm = instance.exports; mem = wasm.memory;
+  resize();                                  // sizes the canvas and the cell
+  wasm.ac_init(cols, rows, cellW, cellH, 0xACC17);
+  ready = true;                              // only now is ac_resize legal
+  requestAnimationFrame(frame);
+}
+
+async function enter() {
+  $('go').disabled = true; $('go').textContent = 'building the city...';
+  try { await boot(); $('splash').remove(); }
+  catch (e) { $('err').textContent = String(e && e.stack || e);
+              $('go').disabled = false; $('go').textContent = 'retry'; }
+}
+$('go').addEventListener('click', () => enter().then(() => canvas.requestPointerLock()));
+if (new URLSearchParams(location.search).has('auto')) enter();
+</script>
+</body>
+</html>
