@@ -154,22 +154,24 @@ pub const PANE_OFF: [&[u8]; 6] = [b":", b":", b".", b":", b"_", b"#"];
 pub const EDGE_CH: [u8; 6] = [b'|', b'|', b'[', b'{', b'|', b'|'];
 pub const LEDGE_CH: [u8; 6] = [b'=', b'=', b'=', b'=', b'=', b'#'];
 
-/// Building names stamped down the storefront signage row, one character per
-/// half world unit — that is what makes the street band read as shopfront text.
+/// **What a building is called.** One word, and the trade after it is NOT from
+/// here: it is the word for whatever room you walk into on the ground floor
+/// (`interior::ground_room`), so the name over the door and the name of the
+/// room behind it are the same name. There used to be a second table of shop
+/// types for the fascia, and while the fascia carried no readable text nobody
+/// could see that it disagreed with the room — `ORBIT CLINIC` on the front of
+/// `ORBIT GALLERY`. Two tables saying what one building is is one table too
+/// many.
 pub const SIGN_NAMES: [&str; 8] =
     ["NOVA", "ORBIT", "CINDER", "STATIC", "LUMEN", "VECTOR", "EMBER", "SIGNAL"];
-pub const SIGN_TYPES: [&str; 8] =
-    ["SUPPLY", "CAFE", "OFFICES", "CLINIC", "WORKS", "HOUSE", "LAUNDRY", "ARCADE"];
 
 /// Stable per-building identity: same block + same plan id -> same facade.
 pub struct Building {
     pub style: &'static Facade,
-    pub label: [u8; 16],
-    pub label_len: usize,
-    /// How much of `label` is the building's NAME, before the shop type runs
-    /// straight into it. The storefront wants the whole thing; anything that
-    /// wants to say what the building is CALLED — the room you walk into, for
-    /// one — wants only this much.
+    /// What the building is CALLED. The fascia puts the ground-floor room's
+    /// word after it; the room inside puts its own after it; they are the same
+    /// word.
+    pub name: [u8; 16],
     pub name_len: usize,
 }
 
@@ -191,14 +193,16 @@ pub fn building_of(gx: i32, gz: i32, plan_id: u16, block: i32, grain: i32) -> Bu
     let a = noise(kx * 131 + ps * 17, kz * 197 + ps * 41);
     let b = noise(bz * 313 + p * 7, bx * 89 + p * 53);
     let style = &FACADES[((a * 6.0) as usize) % 6];
-    let name = SIGN_NAMES[((b * 8.0) as usize) % 8];
-    let kind = SIGN_TYPES[((b * 64.0) as usize) % 8];
-    let mut label = [0u8; 16];
+    let text = SIGN_NAMES[((b * 8.0) as usize) % 8];
+    let mut name = [0u8; 16];
     let mut n = 0;
-    for &c in name.as_bytes().iter().chain(kind.as_bytes()) {
-        if n < 16 { label[n] = c; n += 1; }
+    for &c in text.as_bytes() {
+        if n < 16 {
+            name[n] = c;
+            n += 1;
+        }
     }
-    Building { style, label, label_len: n, name_len: name.len().min(n) }
+    Building { style, name, name_len: n }
 }
 
 // --- billboards ----------------------------------------------------------

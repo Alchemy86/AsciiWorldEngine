@@ -616,37 +616,116 @@ pub struct Fabric {
     pub core: Option<Core>,
 }
 
-pub fn fabric(site: Site, floor_no: i32) -> Fabric {
-    let (ix, iz) = INWARD[(site.face as usize).min(3)];
-    let bx = site.dx.div_euclid(BLOCK);
-    let bz = site.dz.div_euclid(BLOCK);
-    let fabric_key = hash3(
-        bx.wrapping_mul(6301) + site.plan as i32,
-        bz.wrapping_mul(4507),
-        site.seed ^ 0x1F7,
-    );
-    let key = hash3(
-        bx.wrapping_mul(6301) + site.plan as i32,
-        bz.wrapping_mul(4507) + floor_no.wrapping_mul(9973),
-        site.seed ^ 0x1F7,
-    );
-    let mut r = Rng::new(fabric_key as u64 | ((site.plan as u64) << 32));
-
-    let st = &STYLES[(key % 10) as usize];
+/// **The floor-blind half of the room generator's stream**, on its own.
+///
+/// `across` is the frontage, `deep` how far back it runs, `off` where the
+/// doorway sits along the frontage, and `ceil_t` the raw draw the family's
+/// ceiling range is interpolated with. All four come off the same `Rng` in this
+/// order and nothing above them depends on the storey, which is what makes a
+/// shaft land on the same cells floor after floor.
+///
+/// It is split out of `fabric` because the SILHOUETTE has to know whether a
+/// building can hold a lift core, and it has to know it for every built cell of
+/// every tall plot on every frame. Running the whole of `fabric` there would
+/// pay for a `Style` lookup, a footprint and a ceiling the question does not
+/// depend on — and, worse, would need the doorway's world position, which the
+/// cell asking does not have. Splitting it rather than copying it is what keeps
+/// the two answers from drifting apart.
+#[inline]
+fn frontage(bx: i32, bz: i32, plan: u16, seed: i32) -> (Rng, i32, i32, f32, i32) {
+    let fabric_key =
+        hash3(bx.wrapping_mul(6301) + plan as i32, bz.wrapping_mul(4507), seed ^ 0x1F7);
+    let mut r = Rng::new(fabric_key as u64 | ((plan as u64) << 32));
     // Across the street frontage, and back from it. A room is never square by
     // accident: the two come off different draws. Depth is kept near the depth
     // of a real block, so the back wall is roughly where the back of the
     // building is.
     let across = 14 + r.below(12) as i32;
     let deep = 15 + r.below(9) as i32;
-    let raw_ceiling = st.ceil.0 + (st.ceil.1 - st.ceil.0) * r.f32();
+    let ceil_t = r.f32();
+    // The doorway is two cells wide; put it a little off the middle of the near
+    // wall, so you do not walk into every room down its own axis.
+    let off = 2 + r.below((across as u32).saturating_sub(6).max(1)) as i32;
+    (r, across, deep, ceil_t, off)
+}
+
+/// Where a lift core would stand on a frontage of `across` cells with the
+/// doorway at `off`, or `None` if it will not fit beside the door.
+///
+/// **The core stands beside the entrance**, three cells clear of the doorway on
+/// whichever side has room for it. Two reasons, and the second is the one that
+/// matters: a lift by the door is where a lift is, so walking in off the street
+/// puts the landing in front of you; and a room's frontage runs 14 to 25 cells
+/// on a block whose plots are often half that, so a core at the FAR end of one
+/// would routinely be standing over the avenue rather than in the building.
+/// Hard by the doorway it is as far inside the plot as the doorway is.
+///
+/// A frontage with room on neither side simply gets no lift — one of the two
+/// reasons a building may be tall and still have none, the other being that it
+/// is not tall enough (`World::storeys`).
+#[inline]
+fn core_beside(across: i32, off: i32, ix: i32) -> Option<Core> {
+    // `+a` is `+Z` when the room runs back along X and `+X` when it runs back
+    // along Z — the same mapping `world_of` uses.
+    let hi = off + 3;
+    let lo = off - lift::CORE_W - 1;
+    let hi_ok = hi + lift::CORE_W < across;
+    let lo_ok = lo > 0;
+    if hi_ok && (!lo_ok || across - 1 - hi - lift::CORE_W >= lo) {
+        // Core on the far side of the doorway; the room, and the way you came
+        // in, are on the near side, so the doors face back that way.
+        Some(Core { a0: hi, door_a: hi, in_face: if ix != 0 { 2 } else { 0 } })
+    } else if lo_ok {
+        Some(Core {
+            a0: lo,
+            door_a: lo + lift::CORE_W - 1,
+            in_face: if ix != 0 { 3 } else { 1 },
+        })
+    } else {
+        None
+    }
+}
+
+/// **Could this building hold a lift core at all?** The frontage half of the
+/// lift question, asked without a `Site` and without touching a storey table —
+/// cheap enough for the world generator to ask it of every tall plot while it
+/// is deciding what shape that plot is. See `world::profile`.
+/// **What room you walk into off the street.** The ground floor's family,
+/// asked without a `Site` and without building anything — it comes off the
+/// floor-blind half of the generator's key, so it is one hash and an index.
+///
+/// The fascia needs it: the word after a building's name on the front of it is
+/// the word for the room behind the door, and there is no second table saying
+/// something else. See `palette::Building`.
+#[inline]
+pub fn ground_room(bx: i32, bz: i32, plan: u16, seed: i32) -> Room {
+    let key = hash3(bx.wrapping_mul(6301) + plan as i32, bz.wrapping_mul(4507), seed ^ 0x1F7);
+    STYLES[(key % 10) as usize].room
+}
+
+#[inline]
+pub fn takes_a_core(bx: i32, bz: i32, plan: u16, seed: i32) -> bool {
+    let (_, across, _, _, off) = frontage(bx, bz, plan, seed);
+    core_beside(across, off, 1).is_some()
+}
+
+pub fn fabric(site: Site, floor_no: i32) -> Fabric {
+    let (ix, iz) = INWARD[(site.face as usize).min(3)];
+    let bx = site.dx.div_euclid(BLOCK);
+    let bz = site.dz.div_euclid(BLOCK);
+    let key = hash3(
+        bx.wrapping_mul(6301) + site.plan as i32,
+        bz.wrapping_mul(4507) + floor_no.wrapping_mul(9973),
+        site.seed ^ 0x1F7,
+    );
+    let (r, across, deep, ceil_t, off) = frontage(bx, bz, site.plan, site.seed);
+
+    let st = &STYLES[(key % 10) as usize];
+    let raw_ceiling = st.ceil.0 + (st.ceil.1 - st.ceil.0) * ceil_t;
     // The ground floor keeps whatever its family gives it — a lobby is double
     // height and should be. A stack of double-height storeys is not a building,
     // so everything above it is capped to an ordinary floor-to-ceiling.
     let ceiling = if floor_no == 0 { raw_ceiling } else { raw_ceiling.min(lift::UPPER_CLEAR) };
-    // The doorway is two cells wide; put it a little off the middle of the near
-    // wall, so you do not walk into every room down its own axis.
-    let off = 2 + r.below((across as u32).saturating_sub(6).max(1)) as i32;
 
     let (x0, z0, wx, wz);
     if ix != 0 {
@@ -662,38 +741,7 @@ pub fn fabric(site: Site, floor_no: i32) -> Fabric {
         z0 = if iz > 0 { site.dz } else { site.dz - deep + 1 };
     }
 
-    // **The core stands beside the entrance**, three cells clear of the doorway
-    // on whichever side has room for it. Two reasons, and the second is the one
-    // that matters: a lift by the door is where a lift is, so walking in off
-    // the street puts the landing in front of you; and a room's frontage runs
-    // 14 to 25 cells on a block whose plots are often half that, so a core at
-    // the FAR end of one would routinely be standing over the avenue rather
-    // than in the building. Hard by the doorway it is as far inside the plot as
-    // the doorway is.
-    //
-    // A frontage with room on neither side simply gets no lift — one of the two
-    // reasons a building may be tall and still have none, the other being that
-    // it is not tall enough (`World::storeys`).
-    //
-    // `+a` is `+Z` when the room runs back along X and `+X` when it runs back
-    // along Z — the same mapping `world_of` uses.
-    let hi = off + 3;
-    let lo = off - lift::CORE_W - 1;
-    let hi_ok = hi + lift::CORE_W < across;
-    let lo_ok = lo > 0;
-    let core = if hi_ok && (!lo_ok || across - 1 - hi - lift::CORE_W >= lo) {
-        // Core on the far side of the doorway; the room, and the way you came
-        // in, are on the near side, so the doors face back that way.
-        Some(Core { a0: hi, door_a: hi, in_face: if ix != 0 { 2 } else { 0 } })
-    } else if lo_ok {
-        Some(Core {
-            a0: lo,
-            door_a: lo + lift::CORE_W - 1,
-            in_face: if ix != 0 { 3 } else { 1 },
-        })
-    } else {
-        None
-    };
+    let core = core_beside(across, off, ix);
 
     Fabric { st, r, key, across, deep, off, ceiling, ix, iz, x0, z0, wx, wz, core }
 }
@@ -1071,15 +1119,31 @@ impl Interior {
         // --- the doorway ---------------------------------------------------
         // Two cells wide, carved out of the near wall, on the same world cells
         // the street-side threshold occupies.
+        //
+        // **On the GROUND FLOOR only.** A room five storeys up has no way out
+        // to the street and never had a reason to have one; the outer wall is a
+        // wall at every level. Carving it on every floor is how you could walk
+        // off the fifth floor into thin air: `Engine::portal` takes a
+        // `door = face + 1` cell at face value, put the camera Outdoors at that
+        // floor's eye height, and `Camera::airborne` — which is measured from
+        // `Camera::ground`, and `ground` had just been set back to street level
+        // — then read the whole thing as flying and turned collision off. The
+        // door is not the thing to guard; the door should not be there.
+        //
+        // The way out of an upper floor is the lift it arrived by, and
+        // `door_cells` is repointed at the landing below so `to_exit` floods
+        // toward the thing that IS the way out.
         let (ax, az) = if ix != 0 { (0, 1) } else { (1, 0) };
         it.door_cells = [(dx, dz), (dx + ax, dz + az)];
-        for &(cx, cz) in &it.door_cells.clone() {
-            if let Some(c) = it.at_mut(cx, cz) {
-                c.height = 0;
-                c.win = fit::FLOOR;
-                c.surface = floor::THRESHOLD;
-                c.door = face + 1;
-                c.lit = 100;
+        if floor_no == 0 {
+            for &(cx, cz) in &it.door_cells.clone() {
+                if let Some(c) = it.at_mut(cx, cz) {
+                    c.height = 0;
+                    c.win = fit::FLOOR;
+                    c.surface = floor::THRESHOLD;
+                    c.door = face + 1;
+                    c.lit = 100;
+                }
             }
         }
 
@@ -1119,6 +1183,13 @@ impl Interior {
                     c.sat = 48;
                     c.lit = 90;
                 }
+            }
+            // Above the ground floor the landing IS the way out, so it is what
+            // the exit flood is built from. An upper floor only exists because
+            // this building has a lift, so there is always one to point at.
+            if floor_no > 0 {
+                let l = core.landing();
+                it.door_cells = [it.world_of(l[0].0, l[0].1), it.world_of(l[1].0, l[1].1)];
             }
         }
 
@@ -1639,19 +1710,25 @@ impl Interior {
     /// footprint. Placed here, kept in the world model, drawn like street
     /// furniture.
     fn fixtures(&mut self, st: &Style, r: &mut Rng, key: u32) {
-        // Over the door, always, and on the inside face. It is the one fixture
-        // in the room that has a job rather than a character.
-        let (dx, dz) = self.door_cells[0];
-        let (ex, ez) = self.door_cells[1];
-        self.props.push(Fixture {
-            x: 0.5 * (dx + ex) as f32 + 0.5 + self.ix as f32 * 0.6,
-            z: 0.5 * (dz + ez) as f32 + 0.5 + self.iz as f32 * 0.6,
-            bottom: (self.ceiling - 1.35).max(1.9),
-            top: (self.ceiling - 0.45).max(2.3),
-            kind: Fitting::ExitSign,
-            hue: 8.0,
-            seed: key,
-        });
+        // Over the street door, and on the inside face. It is the one fixture
+        // in the room that has a job rather than a character — which is exactly
+        // why an upper floor does not get one: there is no street door up there
+        // to hang it over, and an EXIT sign on the fifth floor pointing at a
+        // blank wall is worse than none. Up there the LIFT sign over the
+        // landing is the way out, and it is already lit for the same reason.
+        if self.floor == 0 {
+            let (dx, dz) = self.door_cells[0];
+            let (ex, ez) = self.door_cells[1];
+            self.props.push(Fixture {
+                x: 0.5 * (dx + ex) as f32 + 0.5 + self.ix as f32 * 0.6,
+                z: 0.5 * (dz + ez) as f32 + 0.5 + self.iz as f32 * 0.6,
+                bottom: (self.ceiling - 1.35).max(1.9),
+                top: (self.ceiling - 0.45).max(2.3),
+                kind: Fitting::ExitSign,
+                hue: 8.0,
+                seed: key,
+            });
+        }
 
         // And one over the lift landing, if there is one, on the face of the
         // core that the room can see.
@@ -1718,9 +1795,7 @@ impl Interior {
     fn name(&mut self, plan_id: u16, grain: i32, dx: i32, dz: i32) {
         let b = building_of(dx, dz, plan_id, BLOCK, grain);
         let mut n = 0usize;
-        // `building_of` runs the building's NAME straight into its shop TYPE
-        // and the room word replaces the type, so only the name comes across.
-        for &c in b.label[..b.name_len].iter() {
+        for &c in b.name[..b.name_len].iter() {
             self.label[n] = c;
             n += 1;
         }

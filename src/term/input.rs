@@ -70,6 +70,15 @@ const FIRST_HOLD_MARGIN: Duration = Duration::from_millis(30);
 const DELAY_GUESS: Duration = Duration::from_millis(520);
 
 /// The longest gap between two presses that can still be autorepeat rather than
+/// Every key the game reads as a one-shot press rather than as movement.
+/// Ctrl-C, Tab and Esc, then `l m n p q t v x` and Enter. Keep it in step with
+/// the `kb.tapped(...)` calls in `bin/asciicity.rs` — nothing checks that they
+/// agree, and a key missing from here is a key that does nothing.
+const ONE_SHOT: [u32; 12] = [
+    3, 9, 13, 27, b'l' as u32, b'm' as u32, b'n' as u32, b'p' as u32, b'q' as u32,
+    b't' as u32, b'v' as u32, b'x' as u32,
+];
+
 /// a fast human tap. Human double-taps do not get under ~110 ms; autorepeat
 /// does not get over ~55 ms.
 const REPEAT_GAP: Duration = Duration::from_millis(90);
@@ -376,7 +385,14 @@ impl Keyboard {
         }
 
         // One-shot actions are consumed on the press edge, not while held.
-        if matches!(lower, 3 | 9 | 27 | 0x71 | 0x76 | 0x70 | 0x74) {
+        //
+        // **Every key the frontend reads with `tapped` has to be in here**, and
+        // this list is the whole reason a key can be wired up, documented in
+        // `--help`, covered by a passing test and still do nothing at all when
+        // somebody actually plays: `M` and the act key's own HUD note had both
+        // been missing from it. A key that only moves the camera goes through
+        // `bits` instead and does not belong here.
+        if ONE_SHOT.contains(&lower) {
             self.taps.push(lower);
         }
     }

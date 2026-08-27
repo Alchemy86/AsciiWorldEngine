@@ -158,6 +158,25 @@ impl Core {
     }
 }
 
+/// **What a press of the panel did**, so a HUD can say it and a test can assert
+/// it. There is one button at each end of the car and pressing it means "take
+/// me that way"; what it means while the car is ALREADY travelling is the whole
+/// of the interlock that keeps a ride from being a trap you cannot get out of.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Press {
+    /// The car took the call and is committed to the journey. Hands free from
+    /// here: it travels on its own and the player is released.
+    Sent,
+    /// It was already going that way, so the press is a request to STOP. The
+    /// car pulls up at the next floor it reaches — never between floors, so
+    /// there is always a landing to step out on to.
+    Stopping,
+    /// It was going the other way, so the press turns it round.
+    Reversing,
+    /// There is no floor that way.
+    Refused,
+}
+
 /// **The car, as state.** Where it is, where it is going, and how far through
 /// the ride it is. The renderer reads `y` and nothing else.
 #[derive(Clone, Copy)]
@@ -171,11 +190,117 @@ pub struct Lift {
     from: f32,
     t: f32,
     dur: f32,
+    /// **The direction the car is COMMITTED to**, or zero when it is standing.
+    ///
+    /// This is what makes the ride hands-free, and it is the whole answer to
+    /// the design flaw the panel shipped with. A press used to buy exactly one
+    /// storey, so riding anywhere meant pressing again and again — and since a
+    /// press is only taken while you are stood at the panel, the player spent
+    /// the ride facing a button instead of facing the glass. In a lift whose
+    /// entire point is the view out of it, that is the feature defeating
+    /// itself. One press now commits the car to the far end of its shaft and
+    /// lets go of the player entirely.
+    journey: i32,
+    /// **Ride mode**: the car runs end to end, for ever, on its own. It is the
+    /// attract mode of the lift — the same idea `--demo` is for the street —
+    /// and it lives on the car rather than in a frontend for the same reason
+    /// `journey` does: it is a fact about what the car is doing, and the film
+    /// script, the terminal and a test all have to see the same one.
+    ///
+    /// Any call from a player clears it, which is the courtesy `--demo` gives:
+    /// touch the panel and you have the controls back.
+    shuttle: bool,
+    /// How long the car still has to stand at the end of a shuttle run before
+    /// it turns round. It is not decoration: while it is standing the doors are
+    /// a threshold, so a player who wants OFF can simply walk out — which is
+    /// the other half of the courtesy. A loop with no pause in it is a loop you
+    /// can only leave by pressing something.
+    dwell: f32,
 }
+
+/// How long a shuttling car stands at each end before it goes back.
+pub const SHUTTLE_DWELL: f32 = 2.6;
 
 impl Lift {
     pub fn standing(at: usize, y: f32) -> Self {
-        Lift { at, target: at, y, from: y, t: 0.0, dur: 0.0 }
+        Lift {
+            at,
+            target: at,
+            y,
+            from: y,
+            t: 0.0,
+            dur: 0.0,
+            journey: 0,
+            shuttle: false,
+            dwell: 0.0,
+        }
+    }
+
+    /// Is the car committed to a journey — travelling on its own, hands free?
+    #[inline]
+    pub fn riding(&self) -> bool {
+        self.journey != 0
+    }
+
+    /// Is the car shuttling end to end on its own?
+    #[inline]
+    pub fn shuttling(&self) -> bool {
+        self.shuttle
+    }
+
+    /// **Put the car on a loop, or take it off one.** Switching it on sends it
+    /// off at once so there is no dead wait at the start of a ride; switching
+    /// it off leaves the car doing whatever it was doing, which the next press
+    /// of the panel can stop or turn round exactly as normal.
+    pub fn set_shuttle(&mut self, storeys: &[Storey], on: bool) {
+        self.shuttle = on;
+        self.dwell = 0.0;
+        if on && self.journey == 0 {
+            let dir = if self.at == 0 { 1 } else { -1 };
+            self.commit(storeys, dir);
+        }
+    }
+
+    /// Take a call without disturbing ride mode — the shuttle's own turn at
+    /// the end of a run. `call` is the player's door in and clears the loop;
+    /// this is the loop's.
+    fn commit(&mut self, storeys: &[Storey], dir: i32) -> Press {
+        if storeys.is_empty() || dir == 0 || self.next_ahead(storeys, dir).is_none() {
+            return Press::Refused;
+        }
+        self.journey = dir;
+        self.plan(storeys, if dir > 0 { storeys.len() - 1 } else { 0 });
+        Press::Sent
+    }
+
+    /// Which way it is committed, or zero when it is standing. `+1` up.
+    #[inline]
+    pub fn journey(&self) -> i32 {
+        self.journey
+    }
+
+    /// The first floor strictly BEYOND the car in direction `dir`. A floor the
+    /// car is already level with is not ahead of it, which is what `AHEAD`
+    /// buys: without it a press at the instant of arrival picks the floor
+    /// under the car and the ride is a stall.
+    fn next_ahead(&self, storeys: &[Storey], dir: i32) -> Option<usize> {
+        const AHEAD: f32 = 0.05;
+        if dir > 0 {
+            storeys.iter().position(|s| s.base > self.y + AHEAD)
+        } else {
+            storeys.iter().rposition(|s| s.base < self.y - AHEAD)
+        }
+    }
+
+    /// Re-plan the ride from exactly where the car is now. Every call goes
+    /// through here, so a stop, a reversal and a fresh call are the same three
+    /// lines and none of them can move `y`.
+    fn plan(&mut self, storeys: &[Storey], target: usize) {
+        self.target = target;
+        self.from = self.y;
+        self.t = 0.0;
+        let travel = (storeys[target].base - self.y).abs();
+        self.dur = MIN_RIDE.max(travel / SPEED);
     }
 
     #[inline]
@@ -184,26 +309,56 @@ impl Lift {
     }
 
     /// **What the panel does.** `dir` is `+1` for the up button and `-1` for
-    /// the down one. Pressing while the car is already moving extends the ride
-    /// by another floor the same way, which is what a lift does when you press
-    /// again on the way; pressing the other way while moving is ignored, and so
-    /// is asking for a floor that does not exist.
+    /// the down one, and one press is a whole journey rather than one storey:
     ///
-    /// Returns whether the press did anything, so a frontend can say so.
-    pub fn call(&mut self, storeys: &[Storey], dir: i32) -> bool {
-        let want = self.target as i32 + dir;
-        if want < 0 || want as usize >= storeys.len() {
-            return false;
+    ///   * **Standing** — the car commits to the far end of the shaft that way
+    ///     and travels there on its own. The player is released the instant the
+    ///     press is taken: walk to the glass, turn round, look down at the
+    ///     street. Nothing has to be held.
+    ///   * **Already going that way** — the press is the STOP. The car pulls up
+    ///     at the next floor ahead of it, so it always ends level with a
+    ///     landing you can step out on to.
+    ///   * **Going the other way** — the press turns it round, and it commits
+    ///     to the far end the new way.
+    ///
+    /// So the ride is hands-free and still interruptible from either button at
+    /// either end of the car: there is no state this can reach that the player
+    /// cannot get out of with one press.
+    pub fn call(&mut self, storeys: &[Storey], dir: i32) -> Press {
+        if storeys.is_empty() || dir == 0 {
+            return Press::Refused;
         }
-        if self.moving() && (self.target as i32 - self.at as i32).signum() != dir {
-            return false;
+        // Touching the panel takes ride mode off, the same way any key takes
+        // the wheel back off the autopilot. From here it is an ordinary car.
+        self.shuttle = false;
+        self.dwell = 0.0;
+        if self.journey == dir {
+            // Going that way already, so this is the stop request. A lift does
+            // not stop between floors; the next one ahead is where it pulls up.
+            return match self.next_ahead(storeys, dir) {
+                Some(k) => {
+                    self.plan(storeys, k);
+                    self.journey = 0;
+                    Press::Stopping
+                }
+                // Nothing ahead — it is already pulling in to the last floor,
+                // and stopping it is what it is doing.
+                None => Press::Refused,
+            };
         }
-        self.target = want as usize;
-        self.from = self.y;
-        self.t = 0.0;
-        let travel = (storeys[self.target].base - self.y).abs();
-        self.dur = MIN_RIDE.max(travel / SPEED);
-        true
+        // Somewhere to go that way at all? Asked of where the car IS, not of
+        // `target`, so a reversal is judged from the car's real position.
+        if self.next_ahead(storeys, dir).is_none() {
+            return Press::Refused;
+        }
+        let reversing = self.journey == -dir;
+        self.journey = dir;
+        self.plan(storeys, if dir > 0 { storeys.len() - 1 } else { 0 });
+        if reversing {
+            Press::Reversing
+        } else {
+            Press::Sent
+        }
     }
 
     /// Advance the ride. Eased at both ends over the whole trip rather than
@@ -213,6 +368,16 @@ impl Lift {
     /// and `t` only ever advances by `dt`.
     pub fn update(&mut self, storeys: &[Storey], dt: f32) {
         if !self.moving() {
+            // Standing at the end of a shuttle run: count the pause down, then
+            // set off the other way.
+            if self.shuttle && self.dwell > 0.0 {
+                self.dwell -= dt;
+                if self.dwell <= 0.0 {
+                    self.dwell = 0.0;
+                    let dir = if self.at == 0 { 1 } else { -1 };
+                    self.commit(storeys, dir);
+                }
+            }
             return;
         }
         self.t += dt;
@@ -226,6 +391,15 @@ impl Lift {
             self.at = self.target;
             self.dur = 0.0;
             self.t = 0.0;
+            // Arriving ends the commitment. A car standing at a floor is
+            // waiting for a press, whichever way it came.
+            self.journey = 0;
+            // Unless it is on a loop, in which case it stands a moment — doors
+            // open, so anyone who wants off can walk out — and then goes back.
+            // Nothing else in the engine knows ride mode exists.
+            if self.shuttle {
+                self.dwell = SHUTTLE_DWELL;
+            }
         }
     }
 

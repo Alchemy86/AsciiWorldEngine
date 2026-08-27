@@ -13,7 +13,7 @@
 //! `Cell`, in the same units the renderer wants them: hue in DEGREES,
 //! saturation and lit as PERCENTAGES.
 
-use crate::interior::{door_slot, Interior, Site};
+use crate::interior::{door_slot, takes_a_core, Interior, Site};
 use crate::lift::Storey;
 use crate::rng::{hash3, hash3f};
 
@@ -75,6 +75,26 @@ pub struct Cell {
 /// The hues real towers cluster into: red, amber, yellow / green, cyan, blue.
 /// That clustering is what the shipped screenshots are recognisable for.
 const HUE_FAMILY: [u16; 6] = [0, 30, 60, 150, 180, 210];
+
+/// How tall a plot's core must stand before it may be a landmark. Above
+/// `lift::MIN_HEIGHT` on purpose, and by enough: a 24-unit building with the
+/// tallest lobby a family offers serves three storeys, not the four a lift
+/// needs, so a landmark at exactly `MIN_HEIGHT` would sometimes be a building
+/// advertising a lift it has not got. See `World::notable`.
+const LANDMARK_HEIGHT: i32 = 26;
+/// One eligible building in this many is given the landmark shape. See
+/// `World::notable` for why it is not all of them.
+const LANDMARK_ONE_IN: u32 = 4;
+
+/// **`Cell::arch` is two things in one byte.** The low two bits are what the
+/// TOP of this column is — nothing, a curved crown, a spire, a mast — and bit
+/// two says the building this column belongs to is a landmark, which is to say
+/// it has a LIFT in it. Packing the second into the same byte rather than
+/// giving `Cell` a field is the same trade the rest of the struct makes: it is
+/// the currency of the raycaster and is returned by value on every lookup, and
+/// it is still 12 bytes.
+pub const ARCH_SHAPE: u8 = 3;
+pub const ARCH_LIFT: u8 = 4;
 
 /// Plot splits across a 16-cell built quadrant. Picking one per axis per block
 /// is what gives a block anything from one broad tower to a row of narrow ones.
@@ -166,6 +186,58 @@ impl World {
     fn style_key(&self, bx: i32, bz: i32, plot: i32) -> (i32, i32, i32) {
         let (kx, kz) = self.district(bx, bz);
         (kx, kz, if self.grain <= 0 { plot } else { 0 })
+    }
+
+    /// **Is this plot one of the city's landmarks — and therefore one with a
+    /// LIFT in it?** The predicate behind the seventh silhouette (`landmark`),
+    /// and it has to hold in one direction absolutely: **a building shaped like
+    /// a landmark always has a lift.** The other way round is deliberately not
+    /// promised — an ordinary tower may have one too, and the LIFT mark on a
+    /// facade and the `N` pointer are how you find those. A shape that
+    /// sometimes lied would be worse than no shape at all.
+    ///
+    /// Each clause is one of the real conditions, in cost order:
+    ///
+    ///   * `core_h >= LANDMARK_HEIGHT` — tall enough at the entrance to serve
+    ///     `lift::MIN_FLOORS` floors. It is deliberately above
+    ///     `lift::MIN_HEIGHT`: a building of exactly 24 units with a
+    ///     double-height lobby lands on THREE storeys, not four, and would be
+    ///     a landmark with no lift in it. Guarded by
+    ///     `a_landmark_always_has_a_lift_in_it`.
+    ///   * `rings >= 3` and not hollow — it needs a middle to stand a crown on,
+    ///     the same requirement the spire, crown and mast profiles have.
+    ///   * a door, and a frontage that can hold a core beside it — the other
+    ///     half of `World::storeys`, asked here without building a room.
+    ///   * and finally the rarity draw. A lift is not rare — better than half
+    ///     the tall stock has one — so if every one of them were a landmark,
+    ///     a landmark would be the ordinary case and would signal nothing. One
+    ///     in `LANDMARK_ONE_IN` of the eligible get the shape, which puts a
+    ///     handful on any skyline and leaves the other six silhouettes, and the
+    ///     flat-topped stock, to be what they were.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    fn notable(
+        &self,
+        bx: i32,
+        bz: i32,
+        plot: i32,
+        core_h: i32,
+        rings: i32,
+        hollow: bool,
+        lx0: i32,
+        lx1: i32,
+        lz0: i32,
+        lz1: i32,
+        plan: u16,
+    ) -> bool {
+        core_h >= LANDMARK_HEIGHT
+            && rings >= 3
+            && !hollow
+            && hash3(bx * 5171 + plot * 29, bz * 6577 + plot, self.seed ^ 0x2D1)
+                % LANDMARK_ONE_IN
+                == 0
+            && door_slot(bx, bz, plot, lx0, lx1, lz0, lz1, BLOCK_BUILT, self.seed).is_some()
+            && takes_a_core(bx, bz, plan, self.seed)
     }
 
     #[inline]
@@ -353,6 +425,10 @@ impl World {
         // punch straight through into the courtyard and the door would open on
         // to open ground. `door_slot` refuses those rather than the geometry
         // being fixed up afterwards.
+        // The plot's own identity, hoisted: the entrance cell, the profile and
+        // the finished cell all want it, and it is one hash.
+        let plan = 1 + (hash3(bx * 733 + plot, bz * 947, s ^ 0xBE) % 60000) as u16;
+
         let mut door = 0u8;
         // Four integer compares in front of `door_slot`'s two hashes, and they
         // reject all but a handful of columns per plot. This runs for every
@@ -382,7 +458,7 @@ impl World {
                             surface: surface::THRESHOLD,
                             cross: 255,
                             door: face + 1,
-                            plan: 1 + (hash3(bx * 733 + plot, bz * 947, s ^ 0xBE) % 60000) as u16,
+                            plan,
                             ..Default::default()
                         };
                     }
@@ -393,12 +469,22 @@ impl World {
             }
         }
 
+        let notable = self.notable(bx, bz, plot, core_h, rings, hollow, lx0, lx1, lz0, lz1, plan);
+
         let (kx, kz, kp) = self.style_key(bx, bz, plot);
         // The profile and the roof texture come off ONE hash, because a spire
         // has to be a spire in outline as well as in texture. A district shares
         // it at low variety, along with everything else it shares.
-        let (h_prof, arch) =
-            profile(core_h, e, rings, hollow, hash3(kx * 401 + kp, kz * 409, s ^ 0x88));
+        let ph = hash3(kx * 401 + kp, kz * 409, s ^ 0x88);
+        let (h_prof, arch) = if notable {
+            let (h, a) = landmark(core_h, e, rings, ph);
+            // Every column of a landmark carries the lift bit, not only the
+            // crowned ones: the facade needs it to put a LIFT mark over the
+            // entrance, and the entrance is on the outermost ring.
+            (h, a | ARCH_LIFT)
+        } else {
+            profile(core_h, e, rings, hollow, ph)
+        };
         let height = h_prof.clamp(2, MAX_HEIGHT as i32) as u8;
         let hue_base = HUE_FAMILY[(hash3(kx * 13 + kp, kz * 29 + kp, s ^ 0x5A) % 6) as usize];
         let jitter = (hash3(kx + 91, kz + kp * 3, s) % 17) as i32 - 8;
@@ -413,7 +499,7 @@ impl World {
             win: (hash3(kx * 101 + kp, kz * 103, s ^ 0x77) % 4) as u8,
             arch,
             // 1..=65535, never 0: a plot always has an identity.
-            plan: 1 + (hash3(bx * 733 + plot, bz * 947, s ^ 0xBE) % 60000) as u16,
+            plan,
             cross: 255,
             door,
         }
@@ -514,6 +600,76 @@ fn profile(core_h: i32, e: i32, rings: i32, hollow: bool, h: u32) -> (i32, u8) {
             (if e >= inner { body + mast } else { body }, 3)
         }
     }
+}
+
+/// **The seventh silhouette, and the only one that means something.**
+///
+/// The other six are a mix for the skyline's sake — a plot draws one and that
+/// is all it says. This one is reserved: a building shaped like this has a
+/// LIFT in it, and the point of it is that you can see that from across the
+/// city, before you are near enough to read a word written on it. Signage
+/// tells you what a building is once you can read it; a shape tells you from
+/// the far end of an avenue.
+///
+/// The massing is a broad symmetric base, setbacks stepping IN as it rises,
+/// and a crowned tower on the middle with a mast on it — grand-hotel massing
+/// rather than another rectangular slab, and nothing else in the generator
+/// steps up toward its own middle like this or stands that much above its own
+/// base. It is symmetric for free: `e` is the ring index, so every face of the
+/// plot gets the same section.
+///
+/// **Two rules in it are load-bearing and neither is decoration.**
+///
+/// The base is TWO rings deep at exactly `core_h`, and the tiers only start at
+/// the third. The height at the wall behind the entrance is what decides
+/// whether the building has a lift at all (`World::storeys`) and how many
+/// floors it serves, and that wall is one or two rings in — so leaving the
+/// first two rings alone is what stops the shape from changing the answer it is
+/// supposed to be advertising. It also buys the symmetry back: a plot whose
+/// `+X`/`+Z` faces keep a forecourt has its outermost BUILT ring at `e = 1`
+/// there and at `e = 0` on the other two, so a base one ring deep would step in
+/// a cell earlier on two sides of every such plot. Two rings at one height have
+/// the same outline either way.
+///
+/// And the whole composition is fitted into the headroom above `core_h` rather
+/// than being a fixed stack clamped at `MAX_HEIGHT`. A tower already 46 units
+/// tall has six units to play with and gets one setback and a crown; one at 24
+/// has twenty-eight and gets three and a tall one. Clamping instead would flatten
+/// the crown off exactly the tallest towers — the ones you can actually see.
+fn landmark(core_h: i32, e: i32, rings: i32, h: u32) -> (i32, u8) {
+    let max = MAX_HEIGHT as i32;
+    let inner = (rings - 1).max(1);
+    let head = (max - core_h).max(0);
+    // How many setbacks there is room for. A landmark with no headroom is a
+    // hat, so a squat one gets one strong step and a crown rather than three
+    // shallow ones.
+    let tiers = if head >= 16 {
+        inner.min(3)
+    } else if head >= 9 {
+        inner.min(2)
+    } else {
+        inner.min(1)
+    };
+    let unit = (head / (tiers + 2)).clamp(2, 5);
+    let crown = (head - unit * tiers).clamp(2, 10);
+    // The base: two rings at the building's own height, untouched.
+    let t = (e - 1).clamp(0, tiers);
+    let mut top = core_h + unit * t;
+    let mut arch = 0u8;
+    if e >= inner {
+        // The crown, and the mast on it. `arch` 3 is the needle the renderer
+        // already draws for a mast, which is the one it should be: the crown of
+        // a landmark is the same object, and giving it a seventh texture as
+        // well as a seventh outline would be two changes where one will do.
+        top += crown;
+        arch = 3;
+    } else if e >= 1 && e == tiers && (h >> 21) % 3 == 0 {
+        // A minority of them carry the curved shoulder under the crown rather
+        // than a flat terrace, so a street of landmarks is not a street of one
+        // building drawn twice.
+        arch = 1;
+    }
+    (top.min(max), arch)
 }
 
 /// A tower standing alone in the middle of a junction.

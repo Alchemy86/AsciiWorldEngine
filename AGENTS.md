@@ -91,6 +91,23 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   street**. Verify with `--bench`, `--bench --indoors` and
   `--bench --lift-bench`.
 
+  Wayfinding — names on facades, the landmark silhouette, the pointer — 8
+  interleaved pairs of 400 frames, 180x60, load average 2.3:
+
+  | | sim | cast | render | paint | total |
+  |---|---|---|---|---|---|
+  | before, on the STREET | 0.009 | 0.091 | 0.350 | 0.134 | 0.584 |
+  | with them, on the STREET | 0.009 | 0.090 | 0.352 | 0.129 | 0.580 |
+  | before, from the VISTA (`--eye 34`) | 0.009 | 0.666 | 0.488 | 0.147 | 1.310 |
+  | with them, from the VISTA | 0.009 | 0.560 | 0.483 | 0.149 | 1.202 |
+
+  Street **-0.004** against a per-pair spread of +-0.02: nothing, which is the
+  answer wanted — `World::notable` runs for every built cell of every tall plot
+  on every frame. The vista is **-0.108**, every one of six pairs, and that is
+  NOT the code getting faster: landmarks are taller, so the occlusion cull has
+  more to work against. A changed skyline is a changed benchmark; say so rather
+  than banking it.
+
 - **A delta this small needs a null control, so run one.** The same build in
   BOTH slots of the same alternating pattern, ten pairs, comes out +0.0004
   ms/frame with a per-pair range of +-0.006 — so the harness has no slot bias
@@ -307,6 +324,141 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   the panel rather than walking, because you do not walk in a lift.
 - **Where the frames come from, and what they cost.** `docs/lift.png` is
   `--lift` at 180x60 through the committed recipe below. Numbers in "Measuring".
+- **A wall's own text has to be keyed off the SCREEN, not off the world
+  coordinate the DDA hit.** `shaft_glyph`'s floor number used `gx` straight off
+  `along` (`hit.along`, raw world X or Z) to pick which digit-column a pixel
+  was in. Whether `along` increases the same way the screen does, or the
+  opposite way, flips with which of the four cardinal directions a room's
+  `ix`/`iz` (its own inward axis) point — a fact of the raycaster and the
+  camera, not of the shaft — and nothing corrected for it, so a floor number
+  came out mirrored (tens/ones swapped AND every digit's own strokes flipped,
+  which together read exactly like a mirror image) on two of the four
+  orientations and correct on the other two. `render::fascias` never has this
+  problem because it writes into screen COLUMNS directly (`sign_cols[start+i]`
+  for increasing `i`); anything that instead derives a column index from a raw
+  world coordinate is exposed to it. The fix is `render.rs::shaft_glyph`:
+  flip `gx` (`6 - gx`) when `room.ix - room.iz < 0`, measured directly off
+  `Rays::column`'s real `hit.along` against real screen columns for one seed
+  of each orientation, not derived from theory. Guarded by
+  `a_floor_number_on_the_shaft_wall_reads_left_to_right_in_every_orientation`,
+  which rides a real car through the real raycaster for one seed of each
+  `(ix, iz)` and reads the lit sign pixels back off the frame buffer — floor
+  0's box gives the sign's own on-screen span (symmetric, so it only proves
+  the sign is framed at all) and floor 1's off-centre stroke must fall right
+  of that span's centre, never left.
+- **`render.rs::billboard_on`** — the separate, older "NOVA"/"DATA"-style
+  generic panel sign about 10% of facades carry (`SIGN_WORDS`, not a
+  building's own name) — keys its `gx` off `wall_pos = hit.along` the exact
+  same way `shaft_glyph` did, uncorrected, and has no test. It was not
+  touched (out of scope for the floor-number fix) but is very likely mirrored
+  on the same two-of-four wall orientations, for the same reason. Worth its
+  own look.
+
+## Wayfinding: names, the seventh silhouette, and the pointer
+
+- **A shape that sometimes lied would be worse than no shape.** The landmark
+  silhouette (`world::landmark`, seventh of seven) is reserved for buildings
+  with a LIFT, and the promise runs in ONE direction only: landmark ⇒ lift is
+  exact, lift ⇒ landmark is not. Better than **half** the tall stock has a lift
+  — measure it, do not guess, the figure that made this design necessary was
+  66% — so if every one were a landmark, a landmark would be the ordinary case.
+  `LANDMARK_ONE_IN` gives it to a quarter of the eligible: ~16% of tall plots,
+  flat-topped stock still ~28%. `a_landmark_always_has_a_lift_in_it` is the
+  guard and it checks five seeds.
+- **`LANDMARK_HEIGHT` is 26 and `lift::MIN_HEIGHT` is 24, and the gap is not
+  slack.** A 24-unit building with the tallest lobby a family offers
+  (`STYLES[..].ceil` tops out at 8.6) serves THREE storeys, not the four
+  `MIN_FLOORS` wants — so a landmark gated at `MIN_HEIGHT` would sometimes be a
+  building advertising a lift it has not got. The fewest floors behind a
+  landmark, measured, is exactly `MIN_FLOORS`: the gate sits on the edge, and
+  the test asserts that equality so anyone lowering it is stopped.
+- **The landmark's base is TWO rings deep at exactly `core_h`, and both reasons
+  are load-bearing.** The height at the wall behind the entrance is what decides
+  whether the building has a lift and how many floors it serves
+  (`World::storeys`), and that wall is one or two rings in — so leaving rings 0
+  and 1 alone is what stops the shape changing the answer it advertises. It also
+  buys the symmetry: a plot whose `+X`/`+Z` faces keep a forecourt has its
+  outermost BUILT ring at `e = 1` there and `e = 0` on the other two, so a base
+  one ring deep steps in a cell earlier on two sides of every such plot. Two
+  rings at one height have the same outline either way.
+- **`Cell::arch` is two fields in one byte** — `ARCH_SHAPE` (the low two bits,
+  what the top of the column is) and `ARCH_LIFT` (bit two, this building is a
+  landmark). Every reader must mask. `Cell` is still 12 bytes, which is the
+  whole reason it was packed rather than given a field.
+- **The predicate has to be cheap because it runs per built cell per frame.**
+  `World::notable` puts three integer tests in front of two hashes, and
+  `interior::takes_a_core` exists so the frontage half of the lift question can
+  be asked without a `Site`, without a doorway position and without building a
+  room. `interior::frontage` is the shared draw sequence so `fabric` and
+  `takes_a_core` cannot drift apart — split it, never copy it.
+- **A building's name is drawn like a registration plate, and for the plate's
+  reason.** The storefront band is a BOARD (`render::FASCIA`, no letters in it)
+  and the name is set into it by `Renderer::fascias`, a second pass. It used to
+  draw the label indexed by world position modulo its length: a name with no
+  beginning and no end that spelt nothing. Half of `ORBIT GALLERY` is `ORBIT
+  GALL`, which is the `1 RG` becoming `1 R` failure exactly.
+- **A board is one whole FACE, and the WORLD is what says so.** A run of screen
+  columns is a complete face only if the wall does not carry on past either end
+  — step one cell along and ask `city_cell`. Anchoring to the visible run alone
+  makes the letters swim as you walk; anchoring to a fixed world lattice was
+  tried and fails because a plot face (5..16 cells) is shorter than a name.
+- **`fascias` runs straight after `walls`, NOT after the props.** A plate waits
+  for every car body because a car drawn later clips it. A fascia's equivalent
+  hazard is another BUILDING, and every building is already in the depth buffer.
+  A lamppost in front of a shopfront is the street, not the hazard — waiting for
+  the props was tried and is why almost no building on a busy street had a name.
+- **Only record a band cell that actually won its cell.** The wall pass marches
+  near to far and a facade BEHIND a nearer one still runs the band branch; its
+  `put` is thrown out but its record sends `fascias` to test a cell belonging to
+  something else. Nothing was ever written until `g.depth_at(x, y) == hit.dist`
+  gated the record. Two wrong fixes were tried first.
+- **There was one name table too many.** The fascia had `SIGN_TYPES` and the
+  lobby had `Room::word()`, so `ORBIT CLINIC` was painted on the front of
+  `ORBIT GALLERY` — invisible while the fascia was gibberish. `SIGN_TYPES` is
+  deleted; `interior::ground_room` is the one answer, and
+  `the_name_on_the_front_is_the_name_of_the_room_behind_the_door` keeps it.
+- **`LIFT_HUE` (44) is one fact in four places**: the lit doorway, the `LIFT`
+  sign over the landing inside, the `LIFT` mark on the fascia and a landmark's
+  gold roofline. If it moves, it moves in `render.rs` and everything follows.
+- **The `LIFT` mark is asked of the world model, not read off the cell.** Most
+  lift buildings are not landmarks, so `ARCH_LIFT` is the wrong source. A face
+  ends where the entrance bay is cut out of it, so the cell past one end of a
+  run is very often the threshold — and beside the door is the only place the
+  mark belongs anyway.
+- **`--wayfind` is the evidence tool**, next to `--plate-shot`, `--doorway` and
+  `--lift`. `--landmark` targets the tallest landmark (the shape evidence has to
+  be shot from the vista deck — a setback cannot be seen from a pavement),
+  `--tallest` the building `--lift` picks, no flag the nearest. It walks from
+  the spawn steering by nothing but the pointer and exits non-zero if it does
+  not arrive. The walk needs the attract mode's own lesson: a forced turn runs
+  until there is road ahead, not for a fixed time, or it wedges — it wedged 154
+  paces short of the door before `dodge` was given hysteresis.
+- **A far frame straight back from an entrance is a picture of somebody else's
+  wall.** Roadway runs about eight units out from a door and then it is the
+  block opposite; the long view of a building is down the avenue it stands on.
+
+## The lift: what playing it found
+
+- **One press commits the car to the whole journey** (`Lift::journey`). It used
+  to buy one storey, and a press is only taken while you stand at the panel — so
+  riding anywhere meant facing a button for the whole climb, in a lift whose
+  entire reason to exist is the view out of it. It stays interruptible: the same
+  button again stops it at the NEXT floor (never between floors, so there is
+  always a landing to step out on to) and the button at the other end turns it
+  round. `a_committed_ride_can_be_stopped_and_can_be_turned_round` guards both.
+- **Ride mode is `Lift::shuttle`, on the car and not in a frontend.** `L` or
+  `--ride`. Any `call` clears it, which is `--demo`'s courtesy; `SHUTTLE_DWELL`
+  is not decoration — while the car stands at an end the doors are a threshold,
+  so somebody who wants off can simply walk out rather than having to press.
+- **An upper floor is a floor, not a ledge.** `Interior::build` carved the
+  street doorway into the near wall on EVERY storey, so the fifth floor had a
+  door to the pavement; `Engine::portal` took it at face value, put the camera
+  Outdoors at that floor's eye height, and `Camera::airborne` — measured from
+  `Camera::ground`, just reset to street level — read that as flying and turned
+  collision off. The door is not the thing to guard: it should not be there.
+  Above the ground floor `door_cells` points at the LIFT LANDING instead, so
+  `to_exit` floods toward the thing that really is the way out, and there is no
+  EXIT sign up there to hang over a blank wall.
 
 ## Registration plates, and the grid's background plane
 
@@ -475,6 +627,14 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   frames had to be regenerated after the building profiles landed. If you change
   `world.rs` or `render.rs`, re-shoot every picture in `docs/` that shows the
   thing you changed.
+- **Stale as of the wayfinding work**: anything showing a skyline or a
+  storefront predates the landmark silhouette and the fascia names —
+  `docs/silhouettes.png`, `docs/variety.png`, `docs/frames/city-street.png`,
+  `docs/frames/city-vista.png` and `docs/frames/city-rain.png`. The four
+  front-page frames are seed 90210 at 180x60 and must be re-shot TOGETHER.
+  `docs/wayfinding.png` is the current build; its recipe is `--wayfind
+  --landmark` and `--wayfind --tallest` at 180x60, each `.svg` through headless
+  Chrome at `1980,1090`, then the label/append method above.
 - `docs/interiors.png` is stale as of the floor/wall/ceiling hue-separation
   work above — its colours predate `floor_hue` and `CEIL_HUE`. Re-shoot it
   with `--doorway` next time interiors are touched; it was not re-shot here

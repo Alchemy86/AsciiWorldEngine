@@ -91,6 +91,71 @@ pub struct Engine {
     frame: Vec<u8>,
 }
 
+/// **Where the nearest lift is.** What `Engine::nearest_lift` found: the
+/// entrance cell, the building's name, how many floors it serves, how far off
+/// it is and whether it is one of the landmark-shaped ones you can pick out of
+/// a skyline. Fixed bytes rather than a `String`, so asking costs no heap.
+#[derive(Clone, Copy)]
+pub struct Wayfind {
+    pub x: i32,
+    pub z: i32,
+    pub dist: f32,
+    pub floors: usize,
+    pub landmark: bool,
+    name: [u8; 24],
+    name_len: usize,
+}
+
+impl Wayfind {
+    pub fn name(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("")
+    }
+
+    /// Which way to go, as a compass point. `+Z` is south, which is the
+    /// convention the whole engine uses — `Camera::yaw` zero looks north.
+    pub fn compass(&self, from_x: f32, from_z: f32) -> &'static str {
+        const POINTS: [&str; 8] =
+            ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+        let (dx, dz) = (self.x as f32 + 0.5 - from_x, self.z as f32 + 0.5 - from_z);
+        // Bearing clockwise from north, and north is `-Z`.
+        let bearing = dx.atan2(-dz).rem_euclid(core::f32::consts::TAU);
+        POINTS[((bearing / (core::f32::consts::TAU / 8.0)).round() as usize) % 8]
+    }
+
+    /// How far to TURN to be facing it, in radians, signed: positive is to the
+    /// right. A compass point says where it is; this says what to do about it.
+    pub fn turn_from(&self, from_x: f32, from_z: f32, yaw: f32) -> f32 {
+        let (dx, dz) = (self.x as f32 + 0.5 - from_x, self.z as f32 + 0.5 - from_z);
+        let want = dx.atan2(-dz);
+        let mut d = want - yaw;
+        while d > core::f32::consts::PI {
+            d -= core::f32::consts::TAU;
+        }
+        while d < -core::f32::consts::PI {
+            d += core::f32::consts::TAU;
+        }
+        d
+    }
+
+    /// "ahead", "to your left", "behind you" — the turn as a player would say
+    /// it, so the HUD does not have to print radians at somebody.
+    pub fn hand(&self, from_x: f32, from_z: f32, yaw: f32) -> &'static str {
+        let d = self.turn_from(from_x, from_z, yaw);
+        let a = d.abs();
+        if a < 0.35 {
+            "straight ahead"
+        } else if a > 2.35 {
+            "behind you"
+        } else if a > 1.2 {
+            if d > 0.0 { "hard right" } else { "hard left" }
+        } else if d > 0.0 {
+            "to your right"
+        } else {
+            "to your left"
+        }
+    }
+}
+
 impl Engine {
     /// `cell_w` / `cell_h` are the display cell's aspect — 1:2 for a terminal
     /// character, roughly 5.5:9 for a canvas of square-ish glyphs. It is the
@@ -347,24 +412,133 @@ impl Engine {
             self.act_note = "";
             return false;
         };
-        let took = l.call(&r.storeys, dir);
-        if took {
+        let press = l.call(&r.storeys, dir);
+        if press != lift::Press::Refused {
             r.lift = Some(l);
         }
-        self.act_note = if took {
-            if dir > 0 { "going up" } else { "going down" }
-        } else if dir > 0 {
-            "top floor"
-        } else {
-            "ground floor"
+        // **One press is a whole journey, and the second press is the brake.**
+        // The note says so, because a control you have to discover by holding
+        // it down is the control that shipped and was wrong.
+        self.act_note = match press {
+            lift::Press::Sent if dir > 0 => "going up — press again to stop",
+            lift::Press::Sent => "going down — press again to stop",
+            lift::Press::Stopping => "stopping at the next floor",
+            lift::Press::Reversing if dir > 0 => "turning round — going up",
+            lift::Press::Reversing => "turning round — going down",
+            lift::Press::Refused if dir > 0 => "top floor",
+            lift::Press::Refused => "ground floor",
         };
-        took
+        press != lift::Press::Refused
     }
 
     /// The car we are riding, if we are riding one.
     #[inline]
     pub fn lift(&self) -> Option<&Lift> {
         self.world.interior()?.lift.as_ref()
+    }
+
+    /// **The nearest building you can go up in**, and which way it lies.
+    ///
+    /// The city is unbounded, so wandering is not a strategy: a lift you cannot
+    /// find is a lift you have not got. This is the answer to "where is one" —
+    /// a pointer, not a map and not a teleport. It is the world model's own
+    /// answer, asked the same way `--lift` asks it, so what the HUD says and
+    /// what is actually there cannot disagree.
+    ///
+    /// It searches in expanding RINGS and stops at the end of the first ring
+    /// that found anything, rather than scanning a square and sorting. Better
+    /// than half the tall stock has a lift, so the nearest is usually a few
+    /// blocks off and the search is over long before the bound.
+    pub fn nearest_lift(&self, radius: i32) -> Option<Wayfind> {
+        let (cx, cz) = (self.cam.x.floor() as i32, self.cam.z.floor() as i32);
+        let mut best: Option<Wayfind> = None;
+        for r in 0..=radius {
+            for dz in -r..=r {
+                for dx in -r..=r {
+                    // The ring, not the square: everything inside it was
+                    // covered by a smaller `r`.
+                    if dx.abs() != r && dz.abs() != r {
+                        continue;
+                    }
+                    let (x, z) = (cx + dx, cz + dz);
+                    let c = self.world.city_cell(x, z);
+                    if c.door == 0 || c.door > 4 {
+                        continue;
+                    }
+                    let site = interior::Site {
+                        seed: self.world.seed,
+                        dx: x,
+                        dz: z,
+                        face: c.door - 1,
+                        plan: c.plan,
+                        grain: self.world.grain,
+                    };
+                    let floors = self.world.storeys(site).len();
+                    if floors == 0 {
+                        continue;
+                    }
+                    let dist = ((x - cx) as f32).hypot((z - cz) as f32);
+                    if best.is_some_and(|b| b.dist <= dist) {
+                        continue;
+                    }
+                    // The name as it is written on the front of it, so what
+                    // the pointer says and what you will read when you get
+                    // there are the same words.
+                    let bld = palette::building_of(x, z, c.plan, world::BLOCK, self.world.grain);
+                    let room = interior::ground_room(
+                        x.div_euclid(world::BLOCK),
+                        z.div_euclid(world::BLOCK),
+                        c.plan,
+                        self.world.seed,
+                    );
+                    let mut name = [b' '; 24];
+                    let mut n = 0;
+                    for &ch in bld.name[..bld.name_len].iter().chain(b" ").chain(room.word().as_bytes()) {
+                        if n < name.len() {
+                            name[n] = ch;
+                            n += 1;
+                        }
+                    }
+                    best = Some(Wayfind {
+                        x,
+                        z,
+                        dist,
+                        floors,
+                        // A landmark is shaped so you can see it coming; an
+                        // ordinary tower with a lift in it is not, and the
+                        // pointer says which so the player knows whether to
+                        // look for a shape or for a word.
+                        landmark: self.world.city_cell(x, z + 1).arch & world::ARCH_LIFT != 0
+                            || self.world.city_cell(x + 1, z).arch & world::ARCH_LIFT != 0
+                            || self.world.city_cell(x, z - 1).arch & world::ARCH_LIFT != 0
+                            || self.world.city_cell(x - 1, z).arch & world::ARCH_LIFT != 0,
+                        name,
+                        name_len: n,
+                    });
+                }
+            }
+            if best.is_some() {
+                break;
+            }
+        }
+        best
+    }
+
+    /// **Ride mode.** Put the car we are standing in on a loop end to end, or
+    /// take it off one; says whether there was a car to do it to.
+    ///
+    /// It is the lift's attract mode and it is the same shape `--demo` has: the
+    /// world model does the driving, the player keeps the camera the whole
+    /// time, and one touch of the panel hands the controls back
+    /// (`Lift::call` clears it). No frontend holds any of this state.
+    pub fn set_lift_ride(&mut self, on: bool) -> bool {
+        let Place::Indoors(r) = &mut self.world.place else { return false };
+        let Some(mut l) = r.lift else { return false };
+        l.set_shuttle(&r.storeys, on);
+        r.lift = Some(l);
+        r.retune();
+        self.act_note = if on { "ride mode: the car runs on its own" } else { "" };
+        true
     }
 
     /// The room we are in, if we are in one.
@@ -376,6 +550,29 @@ impl Engine {
     /// The nearest thing in the room worth walking up to. Empty outdoors.
     pub fn interaction(&self) -> Option<(&interior::Fixture, f32)> {
         self.world.interior()?.interaction_near(self.cam.x, self.cam.z)
+    }
+
+    /// **What the act key would do if you pressed it now** — the verb and the
+    /// thing — so every frontend says the same and says it BEFORE the press.
+    ///
+    /// A lift panel is the one fixture whose meaning depends on more than
+    /// which fixture it is: while the car is committed to a journey the button
+    /// under your hand is the brake, and the one at the other end turns it
+    /// round. Saying "GO UP" at a car that is already going up is how a player
+    /// ends up believing they have to hold the key down.
+    pub fn act_prompt(&self) -> Option<(&'static str, &'static str)> {
+        let r = self.world.interior()?;
+        let (f, _) = r.interaction_near(self.cam.x, self.cam.z)?;
+        let dir = match f.kind {
+            interior::Fitting::CallUp => 1,
+            interior::Fitting::CallDown => -1,
+            _ => return Some((f.kind.verb(), f.kind.label())),
+        };
+        Some(match r.lift.map(|l| l.journey()) {
+            Some(j) if j == dir => ("STOP", "THE LIFT"),
+            Some(j) if j == -dir => ("TURN ROUND", "THE LIFT"),
+            _ => (f.kind.verb(), f.kind.label()),
+        })
     }
 
     /// Cast and draw. Split from `step` so a frontend can time the two halves
@@ -1186,11 +1383,20 @@ mod tests {
         let (f, _) = e.interaction().expect("nothing within reach at the panel");
         assert_eq!(f.kind, interior::Fitting::CallUp, "the near button is not the up one");
 
-        // Press it, and follow the car every frame.
+        // **Press it ONCE, then take your hands off.** Not one more act bit for
+        // the rest of the ride: the whole point of the commitment is that the
+        // player is released to look out of the glass, and a ride that needed
+        // the key held is the flaw this replaced.
         let mut heights = vec![e.lift().unwrap().y];
         e.step(1.0 / 60.0, camera::key::ACT, 0.0, 0.0);
         assert!(e.lift().unwrap().moving(), "pressing the panel did not send the car anywhere");
-        for _ in 0..600 {
+        assert!(e.lift().unwrap().riding(), "one press did not commit the car to a journey");
+        assert_eq!(
+            e.lift().unwrap().target,
+            storeys.len() - 1,
+            "one press should commit the car to the top of the shaft"
+        );
+        for _ in 0..6000 {
             e.step(1.0 / 60.0, 0, 0.0, 0.0);
             heights.push(e.lift().unwrap().y);
             if !e.lift().unwrap().moving() {
@@ -1199,32 +1405,31 @@ mod tests {
         }
         let l = *e.lift().unwrap();
         assert!(!l.moving(), "the car never arrived");
-        assert_eq!(l.at, 1, "one press should be one floor");
-        assert_eq!(l.y, storeys[1].base);
-        // **No teleport.** The car passed through every height between the two
-        // floors, and never moved more in one frame than a lift could.
+        assert!(!l.riding(), "the car arrived still committed to a journey");
+        assert_eq!(l.at, storeys.len() - 1, "one press, hands off, should reach the top floor");
+        assert_eq!(l.y, storeys[l.at].base);
+        // **No teleport.** The car passed through every height on the way up
+        // and never moved more in one frame than a lift could.
         let step_max = heights.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
         assert!(step_max < lift::SPEED / 30.0, "the car jumped {step_max} units in a frame");
         assert!(heights.len() > 60, "the ride took {} frames — that is a cut", heights.len());
         for want in [0.2f32, 0.5, 0.8] {
-            let y = storeys[0].base + (storeys[1].base - storeys[0].base) * want;
+            let y = storeys[0].base + (storeys[l.at].base - storeys[0].base) * want;
             assert!(
                 heights.windows(2).any(|w| (w[0] - y).signum() != (w[1] - y).signum() || w[0] == y),
                 "the car never passed {y}"
             );
         }
 
-        // Hold the button down: it is an EDGE, so it presses once.
+        // Hold the button down at the top: it is an EDGE, and there is nowhere
+        // above to go, so nothing happens however long it is held.
         for _ in 0..30 {
             e.step(1.0 / 60.0, camera::key::ACT, 0.0, 0.0);
         }
-        assert_eq!(e.lift().unwrap().target, 2, "holding the button rang it more than once");
-        while e.lift().unwrap().moving() {
-            e.step(1.0 / 60.0, 0, 0.0, 0.0);
-        }
-        assert_eq!(e.lift().unwrap().at, 2);
+        assert!(!e.lift().unwrap().moving(), "the up button moved a car already at the top");
 
-        // And down again, from the other end of the car.
+        // And down again, from the other end of the car — one press, all the
+        // way back to the ground.
         let down_at = e.room().unwrap().point_of(lift::CORE_W as f32 - 1.2, 1.5);
         e.cam.x = down_at.0;
         e.cam.z = down_at.1;
@@ -1236,13 +1441,78 @@ mod tests {
             "the near button at the other end is not the down one"
         );
         e.step(1.0 / 60.0, camera::key::ACT, 0.0, 0.0);
-        for _ in 0..600 {
+        for _ in 0..6000 {
             e.step(1.0 / 60.0, 0, 0.0, 0.0);
             if !e.lift().unwrap().moving() {
                 break;
             }
         }
-        assert_eq!(e.lift().unwrap().at, 1, "the down button did not take the car down");
+        assert_eq!(e.lift().unwrap().at, 0, "the down button did not take the car to the ground");
+    }
+
+    /// **A ride you cannot cancel is worse than one you have to hold.** The
+    /// second press is the brake and the button at the other end is the
+    /// reverse, and both leave the car LEVEL with a floor — never stranded
+    /// between two, which is the one state you cannot step out of.
+    #[test]
+    fn a_committed_ride_can_be_stopped_and_can_be_turned_round() {
+        let (mut e, _) = walk_into_a_lift(0xACC17);
+        let storeys = e.room().unwrap().storeys.clone();
+        let up_at = e.room().unwrap().point_of(1.2, 1.5);
+        let down_at = e.room().unwrap().point_of(lift::CORE_W as f32 - 1.2, 1.5);
+        let stand = |e: &mut Engine, p: (f32, f32)| {
+            e.cam.x = p.0;
+            e.cam.z = p.1;
+            e.cam.halt();
+            e.step(0.0, 0, 0.0, 0.0);
+        };
+        fn settle(e: &mut Engine) {
+            for _ in 0..6000 {
+                if !e.lift().unwrap().moving() {
+                    return;
+                }
+                e.step(1.0 / 60.0, 0, 0.0, 0.0);
+            }
+            panic!("the car never settled");
+        }
+
+        // Commit up, let it get properly under way, then press the SAME button.
+        stand(&mut e, up_at);
+        e.step(1.0 / 60.0, camera::key::ACT, 0.0, 0.0);
+        for _ in 0..90 {
+            e.step(1.0 / 60.0, 0, 0.0, 0.0);
+        }
+        let mid = e.lift().unwrap().y;
+        assert!(mid > storeys[0].base, "the car had not left the ground to be stopped");
+        e.step(1.0 / 60.0, camera::key::ACT, 0.0, 0.0);
+        assert!(!e.lift().unwrap().riding(), "the second press did not release the commitment");
+        let stopping_at = e.lift().unwrap().target;
+        assert!(
+            storeys[stopping_at].base > mid,
+            "the car was asked to stop at a floor it had already gone past"
+        );
+        assert!(stopping_at < storeys.len() - 1, "stopping carried on to the top anyway");
+        settle(&mut e);
+        // Level with a real floor, so there is a landing to step out on to.
+        let at = e.lift().unwrap().at;
+        assert_eq!(at, stopping_at);
+        assert_eq!(e.lift().unwrap().y, storeys[at].base);
+        assert!(e.lift().unwrap().level(), "the car stopped between floors");
+
+        // Commit up again, then press the OTHER button: it turns round and
+        // commits the other way, all the way to the ground.
+        e.step(1.0 / 60.0, camera::key::ACT, 0.0, 0.0);
+        for _ in 0..60 {
+            e.step(1.0 / 60.0, 0, 0.0, 0.0);
+        }
+        assert_eq!(e.lift().unwrap().journey(), 1);
+        let turn_from = e.lift().unwrap().y;
+        stand(&mut e, down_at);
+        e.step(1.0 / 60.0, camera::key::ACT, 0.0, 0.0);
+        assert_eq!(e.lift().unwrap().journey(), -1, "the other button did not turn the car round");
+        settle(&mut e);
+        assert_eq!(e.lift().unwrap().at, 0, "turning round did not take it to the ground");
+        assert!(e.lift().unwrap().y < turn_from);
     }
 
     /// You cannot walk out of a moving lift, and when it stops you can — into
@@ -1254,17 +1524,23 @@ mod tests {
         let (la, ld) = core.landing()[0];
         let out = interior::INWARD[core.in_face as usize];
 
-        // Send it up three floors, and try to walk out of it all the way.
+        // Send it up — one press, hands off — and try to walk out of it the
+        // whole way. Then press again to pull it up at the next floor, which is
+        // the landing this walks out on to.
         let up_at = e.room().unwrap().point_of(1.2, 1.5);
         e.cam.x = up_at.0;
         e.cam.z = up_at.1;
         e.cam.yaw = (-out.0 as f32).atan2(out.1 as f32);
         e.cam.halt();
-        for _ in 0..3 {
-            e.step(1.0 / 60.0, camera::key::ACT, 0.0, 0.0);
+        e.step(1.0 / 60.0, camera::key::ACT, 0.0, 0.0);
+        // Far enough up that floors 1 and 2 are behind us, so the brake lands
+        // on a floor with room under it and the walk out is a real storey.
+        while e.lift().unwrap().y < e.room().unwrap().storeys[2].base {
             e.step(1.0 / 60.0, 0, 0.0, 0.0);
         }
-        assert_eq!(e.lift().unwrap().target, 3);
+        e.step(1.0 / 60.0, camera::key::ACT, 0.0, 0.0);
+        let stopping_at = e.lift().unwrap().target;
+        assert!(stopping_at >= 3, "the brake picked floor {stopping_at}");
         let mut frames = 0;
         while e.lift().unwrap().moving() {
             // The landing cell is solid while the car is between floors, so
@@ -1279,7 +1555,7 @@ mod tests {
             assert!(frames < 2000, "the car never got there");
         }
         let floor = e.lift().unwrap().at;
-        assert_eq!(floor, 3);
+        assert_eq!(floor, stopping_at, "the brake did not stop where it said it would");
         let want = e.room().unwrap().storeys[floor];
 
         // Now it is level: the doors are a threshold again and walking takes
@@ -1295,11 +1571,328 @@ mod tests {
         assert_eq!(room.floor, want.floor, "stepped out on to the wrong floor");
         assert_eq!(room.base, want.base, "the floor is not where the shaft said it was");
         assert_eq!(room.ceiling, want.ceiling);
-        assert!(room.label_str().contains("FLOOR 3"), "the room is called {}", room.label_str());
+        assert!(
+            room.label_str().contains(&format!("FLOOR {stopping_at}")),
+            "the room is called {}",
+            room.label_str()
+        );
         assert!((e.cam.eye - (want.base + camera::EYE_STREET)).abs() < 0.01, "the eye is not on the slab");
         // And the room is a room: floor under us, way out, glazing.
         assert!(room.open(e.cam.x.floor() as i32, e.cam.z.floor() as i32));
         assert!(!room.windows.is_empty());
+    }
+
+    /// **What is written on the front of a building is what the room behind
+    /// the door is called.** They were two different tables and, while the
+    /// fascia carried no readable text, nobody could see that they disagreed:
+    /// `ORBIT CLINIC` was painted on the front of `ORBIT GALLERY`. Putting a
+    /// legible name on a facade is what made it a bug rather than a curiosity,
+    /// and the fix was to delete the second table, not to reconcile them.
+    #[test]
+    fn the_name_on_the_front_is_the_name_of_the_room_behind_the_door() {
+        let mut checked = 0;
+        for seed in [0xACC17u32, 23, 90210] {
+            let w = World::new(seed);
+            for z in 4000..4200 {
+                for x in 4000..4200 {
+                    let c = w.city_cell(x, z);
+                    if c.door == 0 || c.door > 4 {
+                        continue;
+                    }
+                    let site = Site {
+                        seed: seed as i32,
+                        dx: x,
+                        dz: z,
+                        face: c.door - 1,
+                        plan: c.plan,
+                        grain: w.grain,
+                    };
+                    // What a player reads on the fascia...
+                    let bld = palette::building_of(x, z, c.plan, world::BLOCK, w.grain);
+                    let outside = format!(
+                        "{} {}",
+                        core::str::from_utf8(&bld.name[..bld.name_len]).unwrap(),
+                        interior::ground_room(
+                            x.div_euclid(world::BLOCK),
+                            z.div_euclid(world::BLOCK),
+                            c.plan,
+                            seed as i32,
+                        )
+                        .word()
+                    );
+                    // ...and what the room they walk into calls itself.
+                    let room = Interior::build(site, 0, 0.0, w.storeys(site));
+                    assert_eq!(
+                        outside,
+                        room.label_str(),
+                        "the fascia and the lobby disagree on seed {seed} at {x},{z}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 200, "only {checked} entrances checked");
+    }
+
+    /// **The pointer points at something that is really there.** It is the only
+    /// answer to "where is a lift" the player has, and the city is unbounded,
+    /// so an answer that is merely plausible is worse than none: it sends
+    /// somebody on a walk to a building with no way up in it. What it names,
+    /// how far it says, and which way it says are all checked against the world
+    /// model rather than against itself.
+    #[test]
+    fn the_nearest_lift_pointer_names_a_building_that_has_one() {
+        for seed in [0xACC17u32, 23, 90210, 7] {
+            let e = Engine::new(120, 40, 1.0, 2.0, seed);
+            let w = e.nearest_lift(200).expect("no lift anywhere near the spawn");
+            let c = e.world.city_cell(w.x, w.z);
+            assert!((1..=4).contains(&c.door), "the pointer points at something that is not a door");
+            let site = Site {
+                seed: seed as i32,
+                dx: w.x,
+                dz: w.z,
+                face: c.door - 1,
+                plan: c.plan,
+                grain: e.world.grain,
+            };
+            let storeys = e.world.storeys(site);
+            assert_eq!(w.floors, storeys.len(), "the pointer miscounted the floors");
+            assert!(w.floors >= lift::MIN_FLOORS, "the pointer named a building with no lift");
+            // The name it gives is the name written on the building.
+            let room = Interior::build(site, 0, 0.0, storeys);
+            assert_eq!(w.name(), room.label_str(), "the pointer calls it something else");
+            // And nothing nearer has one, which is what "nearest" means.
+            let here = (e.cam.x, e.cam.z);
+            let r = w.dist.floor() as i32;
+            for dz in -r..=r {
+                for dx in -r..=r {
+                    let (x, z) = (here.0.floor() as i32 + dx, here.1.floor() as i32 + dz);
+                    if ((dx * dx + dz * dz) as f32).sqrt() >= w.dist {
+                        continue;
+                    }
+                    let n = e.world.city_cell(x, z);
+                    if n.door == 0 || n.door > 4 {
+                        continue;
+                    }
+                    assert!(
+                        e.world
+                            .storeys(Site {
+                                seed: seed as i32,
+                                dx: x,
+                                dz: z,
+                                face: n.door - 1,
+                                plan: n.plan,
+                                grain: e.world.grain,
+                            })
+                            .is_empty(),
+                        "there is a nearer lift at {x},{z} than the one the pointer named"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **A building shaped like a landmark always has a lift in it.** That is
+    /// the one direction the seventh silhouette has to be exact in: the whole
+    /// point of it is that you can pick a lift building out of a skyline before
+    /// you are near enough to read anything on it, and a shape that sometimes
+    /// lied would be worse than no shape at all.
+    ///
+    /// The other direction is deliberately NOT asserted. Better than half the
+    /// tall stock has a lift — far too many for the shape to mean anything if
+    /// they all had it — so a landmark is one in `LANDMARK_ONE_IN` of the
+    /// eligible, and the rest are found by the LIFT mark on the facade and by
+    /// the `N` pointer.
+    ///
+    /// It also pins the height gate. `lift::MIN_HEIGHT` is not enough on its
+    /// own: a 24-unit building with the tallest lobby a family offers serves
+    /// three storeys, and the fewest floors behind a landmark measured here is
+    /// exactly `MIN_FLOORS` — so this is sitting right on the edge and will
+    /// catch anyone who lowers `LANDMARK_HEIGHT` to meet it.
+    #[test]
+    fn a_landmark_always_has_a_lift_in_it() {
+        for seed in [0xACC17u32, 23, 90210, 1, 7] {
+            let w = World::new(seed);
+            // (is it landmark-shaped, where is its street door)
+            type Plot = (bool, Option<(i32, i32, u8)>);
+            let mut plots: std::collections::HashMap<(i32, i32, u16), Plot> = Default::default();
+            for bz in 128..146 {
+                for bx in 128..146 {
+                    for oz in 0..world::BLOCK_BUILT {
+                        for ox in 0..world::BLOCK_BUILT {
+                            let (x, z) = (bx * world::BLOCK + ox, bz * world::BLOCK + oz);
+                            let c = w.city_cell(x, z);
+                            if c.plan == 0 {
+                                continue;
+                            }
+                            let e = plots.entry((bx, bz, c.plan)).or_insert((false, None));
+                            if (1..=4).contains(&c.door) {
+                                e.1 = Some((x, z, c.door - 1));
+                            } else if c.height > 0 {
+                                e.0 |= c.arch & world::ARCH_LIFT != 0;
+                            }
+                        }
+                    }
+                }
+            }
+            let mut landmarks = 0;
+            let mut fewest = usize::MAX;
+            for ((_, _, plan), (landmark, door)) in plots {
+                if !landmark {
+                    continue;
+                }
+                landmarks += 1;
+                let (dx, dz, face) =
+                    door.unwrap_or_else(|| panic!("a landmark with no way into it on seed {seed}"));
+                let n = w
+                    .storeys(Site { seed: seed as i32, dx, dz, face, plan, grain: w.grain })
+                    .len();
+                assert!(n > 0, "a landmark with no lift in it on seed {seed}");
+                fewest = fewest.min(n);
+            }
+            assert!(landmarks > 60, "only {landmarks} landmarks in the patch on seed {seed}");
+            assert_eq!(
+                fewest,
+                lift::MIN_FLOORS,
+                "the height gate has drifted off the edge it is set to on seed {seed}"
+            );
+        }
+    }
+
+    /// **Ride mode runs the car on its own, and gets out of the way.** It goes
+    /// end to end, turns round at both ends, stands long enough at each for
+    /// someone to walk out, and the moment the player touches the panel it is
+    /// off and the car is theirs.
+    #[test]
+    fn ride_mode_runs_the_car_end_to_end_and_hands_it_back_on_a_press() {
+        let (mut e, _) = walk_into_a_lift(0xACC17);
+        let top = e.room().unwrap().storeys.len() - 1;
+        assert!(e.set_lift_ride(true), "nothing to put on a loop");
+        assert!(e.lift().unwrap().shuttling());
+        assert!(e.lift().unwrap().moving(), "ride mode did not set off");
+
+        // Two full lengths of the shaft, hands off the whole way.
+        let mut seen_top = false;
+        let mut seen_back = false;
+        let mut stood_level = 0;
+        for _ in 0..40_000 {
+            e.step(1.0 / 60.0, 0, 0.0, 0.0);
+            let l = *e.lift().unwrap();
+            if l.level() {
+                stood_level += 1;
+            }
+            if !seen_top && l.level() && l.at == top {
+                seen_top = true;
+            } else if seen_top && l.level() && l.at == 0 {
+                seen_back = true;
+                break;
+            }
+        }
+        assert!(seen_top, "the car never got to the top on its own");
+        assert!(seen_back, "the car never came back down on its own");
+        // It stood still at the ends rather than snapping round, so there was
+        // a door to walk out of.
+        assert!(
+            stood_level as f32 / 60.0 > lift::SHUTTLE_DWELL,
+            "the car never stood still long enough to get out of"
+        );
+
+        // One press of the panel and it is an ordinary car again.
+        let up_at = e.room().unwrap().point_of(1.2, 1.5);
+        e.cam.x = up_at.0;
+        e.cam.z = up_at.1;
+        e.cam.halt();
+        e.step(1.0 / 60.0, camera::key::ACT, 0.0, 0.0);
+        assert!(!e.lift().unwrap().shuttling(), "the panel did not take ride mode off");
+        for _ in 0..12_000 {
+            e.step(1.0 / 60.0, 0, 0.0, 0.0);
+            if !e.lift().unwrap().moving() {
+                break;
+            }
+        }
+        assert!(!e.lift().unwrap().moving(), "the car kept going after ride mode was off");
+        for _ in 0..600 {
+            e.step(1.0 / 60.0, 0, 0.0, 0.0);
+        }
+        assert!(!e.lift().unwrap().moving(), "the car set off again on its own");
+    }
+
+    /// **An upper floor is a floor, not a ledge.** Walking at the front wall of
+    /// a room on the fifth storey used to put you on the STREET — the room
+    /// carried the same street doorway on every floor it was built on, and
+    /// `Engine::portal` took it at face value however high the room was. The
+    /// camera came out over the roadway at the fifth floor's eye height, which
+    /// `Camera::airborne` then read as flying, so collision went off with it
+    /// and the whole city was walkable from up there.
+    ///
+    /// A room above the ground has no street door and never had a reason to:
+    /// its way out is the lift it arrived by.
+    #[test]
+    fn an_upper_floor_cannot_be_walked_out_of_into_the_open_air() {
+        let (mut e, _) = walk_into_a_lift(0xACC17);
+        // Up, and out on to a real storey.
+        let up_at = e.room().unwrap().point_of(1.2, 1.5);
+        e.cam.x = up_at.0;
+        e.cam.z = up_at.1;
+        e.cam.halt();
+        e.step(0.0, 0, 0.0, 0.0);
+        e.step(1.0 / 60.0, camera::key::ACT, 0.0, 0.0);
+        for _ in 0..6000 {
+            e.step(1.0 / 60.0, 0, 0.0, 0.0);
+            if !e.lift().unwrap().moving() {
+                break;
+            }
+        }
+        let floor = e.lift().unwrap().at;
+        assert!(floor > 0, "the car never left the ground floor");
+        let out = interior::INWARD[e.room().unwrap().core.unwrap().in_face as usize];
+        e.cam.yaw = (-out.0 as f32).atan2(out.1 as f32);
+        e.cam.halt();
+        for _ in 0..400 {
+            e.step(1.0 / 60.0, camera::key::FWD, 0.0, 0.0);
+            if e.lift().is_none() {
+                break;
+            }
+        }
+        let room = e.room().expect("never got out of the car");
+        assert!(e.lift().is_none());
+        assert!(room.floor > 0, "this is meant to be an upper floor");
+        let slab = room.base;
+        assert!(slab > 4.0, "the floor is only {slab} units up");
+
+        // Now walk off in every direction from where the lift left us.
+        // Whatever happens, the answer is never "you are outside, in the air".
+        let (mid_x, mid_z) = (e.cam.x, e.cam.z);
+        let (site, floor_no, base, storeys) =
+            (room.site, room.floor, room.base, room.storeys.clone());
+        for k in 0..16 {
+            let mut e2 = Engine::new(160, 50, 1.0, 2.0, 0xACC17);
+            e2.world.place =
+                Place::Indoors(Box::new(Interior::build(site, floor_no, base, storeys.clone())));
+            e2.cam.ground = slab;
+            e2.cam.eye_target = slab + camera::EYE_STREET;
+            e2.cam.eye = e2.cam.eye_target;
+            e2.cam.x = mid_x;
+            e2.cam.z = mid_z;
+            e2.cam.yaw = k as f32 * core::f32::consts::TAU / 16.0;
+            e2.cam.halt();
+            for _ in 0..900 {
+                e2.step(1.0 / 60.0, camera::key::FWD, 0.0, 0.0);
+                assert!(
+                    e2.world.indoors() || e2.cam.eye <= camera::EYE_STREET + 1.0,
+                    "walked off floor {floor_no} into the open air at {:.1},{:.1}, eye {:.1}",
+                    e2.cam.x,
+                    e2.cam.z,
+                    e2.cam.eye
+                );
+                assert!(
+                    !e2.cam.airborne(),
+                    "collision went off on floor {floor_no} at {:.1},{:.1}",
+                    e2.cam.x,
+                    e2.cam.z
+                );
+            }
+        }
     }
 
     /// **Glass on two sides, and they show two different things.** One side of
@@ -1312,11 +1905,21 @@ mod tests {
         let (mut e, _) = walk_into_a_lift(0xACC17);
         // Take it up, so the street is genuinely below us and there is shaft
         // above and below the car.
-        for _ in 0..4 {
-            e.step(1.0 / 60.0, camera::key::ACT, 0.0, 0.0);
-            e.step(1.0 / 60.0, 0, 0.0, 0.0);
-        }
-        while e.lift().unwrap().moving() {
+        // At the UP button — which button is under your hand is which one you
+        // are nearest, so a test that presses from wherever it happens to be
+        // standing is a test that can silently press the wrong one.
+        let up_at = e.room().unwrap().point_of(1.2, 1.5);
+        e.cam.x = up_at.0;
+        e.cam.z = up_at.1;
+        e.cam.halt();
+        e.step(0.0, 0, 0.0, 0.0);
+        assert_eq!(e.interaction().unwrap().0.kind, interior::Fitting::CallUp);
+        // One press takes it to the top of the shaft on its own.
+        e.step(1.0 / 60.0, camera::key::ACT, 0.0, 0.0);
+        for _ in 0..6000 {
+            if !e.lift().unwrap().moving() {
+                break;
+            }
             e.step(1.0 / 60.0, 0, 0.0, 0.0);
         }
         let up = e.lift().unwrap().y;
@@ -1443,6 +2046,99 @@ mod tests {
         }
         assert!(e.lift().is_some(), "walked at the landing and never got into the car");
         (e, (dx, dz))
+    }
+
+    /// **The floor number on the shaft wall reads left to right, not
+    /// mirrored, whichever of the four ways the building's entrance faces.**
+    /// `hit.along` — the raw world coordinate the DDA hits the shaft's back
+    /// wall at — runs the SAME way the screen does for two of the four
+    /// possible entrance orientations and the OPPOSITE way for the other
+    /// two (measured directly off `Rays::column`: `along` decreases with
+    /// screen column when `room.ix - room.iz < 0`, increases otherwise). A
+    /// floor number keyed straight off it without correcting for that came
+    /// out mirrored on exactly those two orientations — provable on floor 1
+    /// alone, because `glyph3x5('1')` is a single stroke on the RIGHT of its
+    /// own field, not centred, so a mirror puts it on the LEFT instead.
+    ///
+    /// One seed of each `(room.ix, room.iz)` rides from the ground floor,
+    /// through the real raycaster and projector, and the lit sign cells are
+    /// read back off the real frame buffer: floor 0's box (`glyph3x5('0')`,
+    /// symmetric — it only proves the sign is framed and centred at all)
+    /// gives the sign's own on-screen span, and floor 1's stroke must fall
+    /// right of that span's centre, never left.
+    #[test]
+    fn a_floor_number_on_the_shaft_wall_reads_left_to_right_in_every_orientation() {
+        // (seed, expected room.ix, expected room.iz) — one of each of the
+        // four cardinal entrance directions, found by inspection.
+        let cases = [(703703u32, 0, 1), (22u32, 1, 0), (456u32, 0, -1), (4242u32, -1, 0)];
+        for (seed, want_ix, want_iz) in cases {
+            let (mut e, _) = walk_into_a_lift(seed);
+            let car_in = e.room().unwrap().point_of(2.5, 6.0);
+            let up_at = e.room().unwrap().point_of(1.2, 1.5);
+            assert_eq!(
+                (e.room().unwrap().ix, e.room().unwrap().iz),
+                (want_ix, want_iz),
+                "seed {seed}: unexpected orientation"
+            );
+            let face_shaft = |e: &mut Engine| {
+                let p = e.room().unwrap().point_of(1.35, 1.25);
+                e.cam.x = p.0;
+                e.cam.z = p.1;
+                e.cam.yaw = (car_in.0 - e.cam.x).atan2(-(car_in.1 - e.cam.z));
+                e.cam.pitch = -0.26;
+                e.cam.halt();
+                e.step(0.0, 0, 0.0, 0.0);
+            };
+            // The sign's own fixed lit colour, hsl(44, 96, 66) — nothing
+            // else on this wall is this bright and this saturated.
+            let lit_span = |e: &mut Engine| -> Option<(usize, usize)> {
+                e.render();
+                let (cols, rows) = (e.grid.cols, e.grid.rows);
+                let mut xs = vec![];
+                for y in 0..rows {
+                    for x in 0..cols {
+                        let i = y * cols + x;
+                        let (r, g, b) =
+                            (e.grid.rgb[i * 3], e.grid.rgb[i * 3 + 1], e.grid.rgb[i * 3 + 2]);
+                        if r > 230 && (180..230).contains(&g) && (60..110).contains(&b) {
+                            xs.push(x);
+                        }
+                    }
+                }
+                (!xs.is_empty()).then(|| (*xs.iter().min().unwrap(), *xs.iter().max().unwrap()))
+            };
+
+            // Floor 0, at the ground: the box, and the sign's own reference span.
+            e.cam.x = up_at.0;
+            e.cam.z = up_at.1;
+            face_shaft(&mut e);
+            let (box_x0, box_x1) =
+                lit_span(&mut e).unwrap_or_else(|| panic!("seed {seed}: no lit sign at floor 0"));
+
+            // Ride up. Floor 1's sign is a single stroke, off to one side.
+            e.step(1.0 / 60.0, camera::key::ACT, 0.0, 0.0);
+            let storeys = e.room().unwrap().storeys.clone();
+            let mut caught = None;
+            for _ in 0..600 {
+                let Some(l) = e.lift().copied() else { break };
+                if l.passing(&storeys) >= 1 {
+                    face_shaft(&mut e);
+                    caught = lit_span(&mut e);
+                    break;
+                }
+                e.step(1.0 / 60.0, 0, 0.0, 0.0);
+            }
+            let (s_x0, s_x1) =
+                caught.unwrap_or_else(|| panic!("seed {seed}: floor 1's sign never appeared"));
+            let mid = (s_x0 + s_x1) as f32 / 2.0;
+            let box_mid = (box_x0 + box_x1) as f32 / 2.0;
+            assert!(
+                mid > box_mid,
+                "seed {seed} (ix={want_ix},iz={want_iz}): floor 1's stroke centred at {mid:.1} \
+                 is not right of the sign's own centre {box_mid:.1} (box span {box_x0}..{box_x1}, \
+                 stroke span {s_x0}..{s_x1}) — the sign is mirrored"
+            );
+        }
     }
 
     #[test]

@@ -39,6 +39,68 @@ const FAR_SPAN: f32 = 252.0;
 const MAX_GROUND: f32 = 143.25;
 /// World height at which the storefront band ends and the tower body begins.
 const STOREFRONT_TOP: f32 = 2.6;
+
+/// **The lift's own colour, everywhere it appears.** The lit doorway on the
+/// street, the LIFT sign over the landing inside, the gold roofline of a
+/// landmark and the LIFT mark on a facade are all this one hue, because they
+/// are all the same fact about a building: there is a way in and a way up.
+pub const LIFT_HUE: f32 = 44.0;
+
+/// The board a shop's name is written on. Four characters of machined fascia,
+/// picked off the wall's own quantised position and its surface texture, so the
+/// band has grain without having letters in it. None of them is a letter, for
+/// the same reason none of a plate's body characters is one the bodywork uses:
+/// the board must not be mistakable for the writing.
+const FASCIA: [u8; 4] = [b'-', b'=', b'=', b'+'];
+
+/// How near a fascia has to be before its name is set into it at all. Beyond
+/// this the board is a board — a coloured band with grain on it and no writing,
+/// which is what it looks like from across a junction. Degrading to a BOARD
+/// rather than to fewer letters is the registration plate's rule and it is
+/// here for the registration plate's reason: half a name reads as a different
+/// name, and a wrong name is worse than none.
+const SIGN_FADE: f32 = 46.0;
+
+/// The characters a fascia carries: the building's own `NAME TRADE`, parted at
+/// `name_len` so the two words read as two words, and `LIFT` after it when the
+/// building has one. Written into a caller-owned buffer, so the pass touches no
+/// heap. Returns how many characters it wrote.
+fn sign_label(head: SignCol, lift: bool, grain: i32, seed: i32, out: &mut [u8; 24]) -> usize {
+    let bld = crate::palette::building_of(head.cx, head.cz, head.plan, crate::world::BLOCK, grain);
+    let mut k = 0usize;
+    let push = |out: &mut [u8; 24], k: &mut usize, s: &[u8]| {
+        for &c in s {
+            if *k < out.len() {
+                out[*k] = c;
+                *k += 1;
+            }
+        }
+    };
+    push(out, &mut k, &bld.name[..bld.name_len]);
+    push(out, &mut k, b" ");
+    // The word after the name is the word for the room behind the door, and
+    // it is the SAME word the room says it is — `--lift` prints `ORBIT
+    // GALLERY` because the fascia says `ORBIT GALLERY`. There is no second
+    // table of shop types for the front of a building any more; two tables
+    // saying what one building is is how a facade came to disagree with its
+    // own lobby.
+    push(
+        out,
+        &mut k,
+        crate::interior::ground_room(
+            head.cx.div_euclid(crate::world::BLOCK),
+            head.cz.div_euclid(crate::world::BLOCK),
+            head.plan,
+            seed,
+        )
+        .word()
+        .as_bytes(),
+    );
+    if lift {
+        push(out, &mut k, b"  LIFT");
+    }
+    k
+}
 /// How tall a street doorway is drawn. Under the storefront band's own top, so
 /// an entrance sits inside the shopfront rather than cutting across it.
 const DOOR_TOP: f32 = 2.35;
@@ -169,6 +231,16 @@ impl Grid {
     /// caller falls back to the blank panel, which can be occluded as much as
     /// it likes and still says only "a plate".
     #[inline]
+    /// What the depth buffer holds at this cell. Used by the fascia pass to
+    /// find out whether the band it just drew actually won its cell.
+    fn depth_at(&self, x: i32, y: i32) -> f32 {
+        if x < 0 || y < 0 || x >= self.cols as i32 || y >= self.rows as i32 {
+            return -1.0;
+        }
+        self.depth[y as usize * self.cols + x as usize]
+    }
+
+    #[inline]
     fn run_is_clear(&self, x: i32, y: i32, n: i32, d: f32) -> bool {
         if y < 0 || y >= self.rows as i32 || x < 0 || x + n > self.cols as i32 {
             return false;
@@ -223,11 +295,30 @@ pub struct Renderer {
     /// tested against the cars drawn before it, and a car drawn afterwards
     /// clips it — which turns `1 RG` into `1 R`. Allocated once.
     plate_q: Vec<PlateDraw>,
+    /// **What each screen column's storefront band belongs to**, filled in by
+    /// the wall pass and read by `fascias` straight afterwards. One entry a
+    /// column, allocated once. See `fascias` for why a building's name cannot
+    /// be drawn where the band itself is drawn.
+    sign_cols: Vec<Option<SignCol>>,
     /// Distance to the ceiling plane at each screen row. The ground has a
     /// standing table on `Projection` because its height never changes; a
     /// ceiling's does, per room, so it is filled in here at the top of the
     /// pass and is the same handful of divides `set_view` already does.
     ceil_d: Vec<f32>,
+}
+
+/// **One column of one building's storefront band**: which building's board it
+/// is, which cell of which face, where the board's row is on screen and how far
+/// away. `fascias` groups consecutive columns of these back into faces.
+#[derive(Clone, Copy)]
+struct SignCol {
+    plan: u16,
+    cx: i32,
+    cz: i32,
+    side: u8,
+    row: i32,
+    dist: f32,
+    hue: f32,
 }
 
 /// One plate, held over to the second pass.
@@ -247,6 +338,7 @@ impl Renderer {
             nearest: vec![f32::INFINITY; cols],
             props: Vec::with_capacity(512),
             plate_q: Vec::with_capacity(crate::entities::VEH_COUNT),
+            sign_cols: vec![None; cols],
             ceil_d: Vec::new(),
         }
     }
@@ -265,6 +357,7 @@ impl Renderer {
         grid.clear();
         if self.nearest.len() != proj.cols {
             self.nearest.resize(proj.cols, f32::INFINITY);
+            self.sign_cols.resize(proj.cols, None);
         }
         // **Which of the two pictures this is** — decided once, here, off the
         // mode the engine is in. Not a test inside the wall pass, and not a
@@ -276,6 +369,24 @@ impl Renderer {
                 self.sky(grid, cam, proj, time);
                 self.ground(grid, world, cam, proj);
                 self.walls(grid, world, proj, rays);
+                // **Straight after the walls, and that is the whole of the
+                // ordering argument.** A registration plate waits for every car
+                // BODY because a car drawn later clips a plate drawn earlier,
+                // and a clipped registration is a different registration. A
+                // fascia's equivalent hazard is another BUILDING cutting the
+                // name — a corner, a tower in front — and every building is in
+                // the depth buffer by the time this runs, so the all-or-nothing
+                // test here catches exactly that.
+                //
+                // A lamppost or a passing van in front of a shopfront is not
+                // that hazard, it is the street. It goes over the sign the way
+                // it goes over the wall the sign is painted on, because that is
+                // what is actually in front of it — and one hidden letter of
+                // `LUMEN ARCADE` is still `LUMEN ARCADE`, where one hidden
+                // character of `RT08 AAR` is a registration someone else owns.
+                // Waiting for the props was tried and it is why almost no
+                // building on a busy street had a name at all.
+                self.fascias(grid, world, proj.cols);
                 self.props(grid, world, cam, proj);
                 self.population(grid, cam, proj, pop);
                 self.rain(grid, cam, proj, sky_fx);
@@ -412,6 +523,7 @@ impl Renderer {
         // changes between screen columns — NOT at every sixth sub-column.
         // Drawing it per sub-column shreds the facade into vertical hash.
         let mut prev: Option<crate::raycast::Hit> = None;
+        self.sign_cols[..proj.cols].fill(None);
         for x in 0..proj.cols {
             let hits = rays.column(x);
             self.nearest[x] = hits.first().map(|h| h.dist).unwrap_or(f32::INFINITY);
@@ -461,6 +573,176 @@ impl Renderer {
                     g, world.grain, proj, hit, &c, h, x as i32, ybuf, edge_v, col_vignette, 1.0,
                 );
                 ybuf = ybuf.min(t);
+            }
+        }
+    }
+
+    /// **A building's name, set across its fascia.** The second half of the
+    /// storefront band, and the reason it is a second pass rather than part of
+    /// the first: a name has to be drawn all or not at all.
+    ///
+    /// This is the registration plate's problem and it takes the plate's
+    /// answer, because it is the same problem. A plate clipped by a corner came
+    /// out as `1 R` when the car's registration was `1 RG` — a DIFFERENT
+    /// registration, which is the one outcome worse than no plate. Half of
+    /// `ORBIT GALLERY` behind a lamppost is `ORBIT GALL`, and a player walking
+    /// a city looking for a building by name would be misled by it. So:
+    ///
+    ///   * the run is tested against the whole depth buffer before one cell of
+    ///     it is written, and when it is not clear the board is left blank —
+    ///     which can be occluded as much as it likes and still says only
+    ///     "a shopfront";
+    ///   * the board is one whole FACE of the building — from one corner of it
+    ///     to the next — so it is a fixed piece of wall and the letters do not
+    ///     slide along it as you walk. Whether a run of columns really is the
+    ///     whole face is a question for the WORLD, not for the picture: step
+    ///     one cell past each end of the run along the wall and ask whether the
+    ///     same building carries on. If it does, the run was cut short by
+    ///     something in front of it or by the edge of the frame, and there is
+    ///     no sign;
+    ///   * past `SIGN_FADE` there is no writing at all, only the board.
+    ///
+    /// The name is the building's own — the same one the room inside is called
+    /// and the same one `--lift` prints — and a building with a LIFT in it says
+    /// so on the end of it, in `LIFT_HUE`, the hue of the sign over the landing
+    /// inside and of the lit doorway underneath.
+    fn fascias(&mut self, g: &mut Grid, world: &World, cols: usize) {
+        let grain = world.grain;
+        let mut x = 0usize;
+        while x < cols {
+            let Some(head) = self.sign_cols[x] else {
+                x += 1;
+                continue;
+            };
+            // The maximal run of columns that are the same FACE: the same
+            // building, the same side of it, and cells that carry on next to
+            // one another. Two faces of one building seen at once across a
+            // corner are two boards, not one.
+            let mut end = x + 1;
+            let mut last = head;
+            while end < cols {
+                let Some(s) = self.sign_cols[end] else { break };
+                if s.plan != head.plan
+                    || s.side != head.side
+                    || (s.cx - last.cx).abs() + (s.cz - last.cz).abs() > 1
+                {
+                    break;
+                }
+                last = s;
+                end += 1;
+            }
+            let (x0, x1) = (x as i32, end as i32 - 1);
+            let n_cols = x1 - x0 + 1;
+            x = end;
+
+            // **Is this the WHOLE face?** A run can end because the wall does —
+            // a corner, the doorway, the end of the plot — or because something
+            // is in the way or the frame ran out. Only the first is a complete
+            // board. The world is what knows: step one cell past each end,
+            // along the wall, and ask whether the same building carries on.
+            //
+            // This is the whole reason a name is safe to draw. Half of
+            // `ORBIT GALLERY` is `ORBIT GALL`, which is a different building —
+            // the registration plate's `1 RG` becoming `1 R` exactly.
+            let along = |c: SignCol| if c.side == 0 { c.cz } else { c.cx };
+            let dir = (along(last) - along(head)).signum();
+            if dir == 0 || n_cols < 3 {
+                continue;
+            }
+            let carries_on = |c: SignCol, step: i32| {
+                let (gx, gz) =
+                    if c.side == 0 { (c.cx, c.cz + step) } else { (c.cx + step, c.cz) };
+                let n = world.city_cell(gx, gz);
+                n.plan == c.plan && n.height > 0
+            };
+            if carries_on(head, -dir) || carries_on(last, dir) {
+                continue;
+            }
+            // **Is there a way UP behind this shopfront?** Asked here rather
+            // than taken off the cell, because the cell only carries the
+            // landmark bit and most lift buildings are not landmarks. A face
+            // ends where the entrance bay is cut out of it, so the cell just
+            // past one end of the run is very often the threshold — and that
+            // is the only place a LIFT mark belongs anyway. A fascia at the
+            // far end of a building does not claim a lift; the one beside the
+            // door does, and the answer is the world model's own, the same one
+            // `--lift` and the `N` pointer get.
+            let door_beside = |c: SignCol, step: i32| {
+                let (gx, gz) =
+                    if c.side == 0 { (c.cx, c.cz + step) } else { (c.cx + step, c.cz) };
+                let n = world.city_cell(gx, gz);
+                if n.plan != c.plan || n.door == 0 || n.door > 4 {
+                    return false;
+                }
+                !world
+                    .storeys(crate::interior::Site {
+                        seed: world.seed,
+                        dx: gx,
+                        dz: gz,
+                        face: n.door - 1,
+                        plan: n.plan,
+                        grain,
+                    })
+                    .is_empty()
+            };
+            let lift = door_beside(head, -dir) || door_beside(last, dir);
+            let near = self.sign_cols[x0 as usize..=x1 as usize]
+                .iter()
+                .filter_map(|s| s.map(|s| s.dist))
+                .fold(f32::MAX, f32::min);
+            if near > SIGN_FADE {
+                continue;
+            }
+
+            // The words, and whether there is room for them.
+            let mut word = [b' '; 24];
+            let n = sign_label(head, lift, grain, world.seed, &mut word) as i32;
+            if n == 0 || n > n_cols {
+                continue;
+            }
+            // **Set solid, and centred on the board.** A registration is spread
+            // to fill its plate because the plate is cut to the registration;
+            // a shop's fascia is the width of the shop and the name is a name
+            // on it, so it goes in the middle at one character a cell. Spacing
+            // it out was tried at two cells a character and the board showing
+            // between the letters read as `O-R-B-I-T`, which is a fascia
+            // hyphenating its own name.
+            let start = x0 + (n_cols - n) / 2;
+
+            // All or nothing: every cell of it tested before one is written.
+            let cell = |i: i32| self.sign_cols[(start + i) as usize];
+            let clear = (0..n).all(|i| {
+                word[i as usize] == b' '
+                    || cell(i).is_some_and(|s| g.run_is_clear(start + i, s.row, 1, s.dist))
+            });
+            if !clear {
+                continue;
+            }
+            // Lit by distance the way a plate is, and never all the way down to
+            // the wall's own brightness: a sign that faded into its facade
+            // would be unreadable long before it was invisible.
+            let k = ((SIGN_FADE - near) / (SIGN_FADE * 0.6)).clamp(0.3, 1.0);
+            for i in 0..n {
+                let ch = word[i as usize];
+                let Some(sc) = cell(i) else { continue };
+                if ch == b' ' {
+                    // The board, taken well down. Leaving the board's own
+                    // brightness in the gap made `ORBIT GALLERY` read as
+                    // `ORBIT-GALLERY`, a fascia hyphenating its own name.
+                    g.put(
+                        start + i,
+                        sc.row,
+                        FASCIA[0],
+                        hsl(sc.hue, 55.0, 20.0),
+                        sc.dist,
+                    );
+                    continue;
+                }
+                // `LIFT` on the end is in the lift's own hue — the hue of the
+                // sign over the landing inside and of the doorway underneath —
+                // and the name is in the building's.
+                let hue = if lift && i >= n - 4 { LIFT_HUE } else { sc.hue };
+                g.put(start + i, sc.row, ch, hsl(hue, 96.0, 50.0 + 36.0 * k), sc.dist);
             }
         }
     }
@@ -524,7 +806,10 @@ impl Renderer {
         let hue = c.hue as f32;
         let sat = c.sat as f32;
         let lit_p = c.lit as f32 / 100.0;
-        let arch = c.arch;
+        // `Cell::arch` carries the shape in its low two bits and "this
+        // building has a lift" in bit two; the facade wants them apart.
+        let arch = c.arch & crate::world::ARCH_SHAPE;
+        let has_lift = c.arch & crate::world::ARCH_LIFT != 0;
         // Architecture overrides the cell's own lattice on sculpted forms.
         let style = match arch {
             1 => 3u8,
@@ -573,6 +858,9 @@ impl Renderer {
             let sn = surf_tex(wall_pos, wy, scale, 3 * hit.cell_x, 5 * hit.cell_z);
             let glyph;
             let colour;
+            // Filled in by the storefront band, and only kept if the cell it is
+            // on actually survives the depth buffer — see the end of the loop.
+            let mut sign_at: Option<SignCol> = None;
 
             if doorway && y >= door_row {
                 // ---- a lit doorway ------------------------------------
@@ -628,10 +916,30 @@ impl Renderer {
                     glyph = if p == 4 { b'-' } else { b'_' };
                     colour = hsl(bld.style.frame_hue, 38.0, 30.0 + 22.0 * b);
                 } else if dr == sf_tmax && sf_tmax >= 3 {
-                    let i = ((2.0 * wall_pos).floor() as i32).unsigned_abs() as usize
-                        % bld.label_len.max(1);
-                    glyph = bld.label[i];
-                    colour = hsl(bld.style.accent_hue, 90.0, 54.0 + 22.0 * b);
+                    // **The fascia, and nothing written on it here.** This band
+                    // used to draw the building's label indexed by world
+                    // position modulo its length — so a name with no beginning
+                    // and no end, ribboned along the whole frontage at half a
+                    // world unit a character, which at any distance at all is a
+                    // row of letters that spells nothing. That is the same
+                    // failure a clipped registration plate had, and the same
+                    // answer applies: draw the BOARD here and set the name into
+                    // it in a second pass, once the whole frame is in the depth
+                    // buffer and the run can be tested all-or-nothing. See
+                    // `Renderer::fascias`.
+                    glyph = FASCIA[(wq.rem_euclid(2) + if sn > 0.55 { 2 } else { 0 }) as usize];
+                    colour = hsl(bld.style.accent_hue, 82.0, 44.0 + 20.0 * b);
+                    // And say, for this column, which building's board it is,
+                    // where it is and how far away — all `fascias` needs.
+                    sign_at = Some(SignCol {
+                        plan: c.plan,
+                        cx: hit.cell_x,
+                        cz: hit.cell_z,
+                        side: hit.side,
+                        row: y,
+                        dist: hit.dist,
+                        hue: bld.style.accent_hue,
+                    });
                 } else if col_n == 0 || col_n == 5 {
                     glyph = EDGE_CH[p];
                     colour = hsl(bld.style.frame_hue, 62.0, 38.0 + 30.0 * b);
@@ -693,20 +1001,43 @@ impl Renderer {
                         colour = hsl(hue, 45.0, 24.0 + 16.0 * b);
                     }
                 } else if y == r0 && r0 > 0 && h >= 3.0 {
-                    glyph = match arch {
-                        1 => b'~',
-                        2 => b'^',
-                        3 => b'*',
-                        _ => b'=',
+                    // **A landmark's whole roofline is gold**, every setback of
+                    // it and the coronet on the middle, in `LIFT_HUE` — the
+                    // same hue as the LIFT sign over the landing inside and the
+                    // lit doorway on the street, because they are all the same
+                    // fact about the building. It is the seventh silhouette's
+                    // other half: the massing is what carries across the city
+                    // and the colour is what tells a landmark from an ordinary
+                    // mast, which has the same needle in the building's own
+                    // hue. Nothing else in the skyline is banded gold.
+                    let (g_arch, l_arch) = if has_lift {
+                        (if arch == 3 { b'^' } else { b'=' }, LIFT_HUE)
+                    } else {
+                        (
+                            match arch {
+                                1 => b'~',
+                                2 => b'^',
+                                3 => b'*',
+                                _ => b'=',
+                            },
+                            if arch == 2 { 48.0 } else { hue },
+                        )
                     };
-                    colour = hsl(if arch == 2 { 48.0 } else { hue }, 100.0, 70.0);
+                    glyph = g_arch;
+                    colour = hsl(l_arch, 100.0, 70.0 + if has_lift { 6.0 } else { 0.0 });
                     if arch == 3 && h >= 20.0 && r0 >= 2 {
-                        g.put(x, r0 - 2, if sn > 0.5 { b'*' } else { b'^' },
-                              hsl(hue, 100.0, 82.0), hit.dist);
-                        g.put(x, r0 - 1, b'|', hsl(hue, 100.0, 55.0), hit.dist);
+                        let (cap, stem) = if has_lift {
+                            (b'@', b'|')
+                        } else if sn > 0.5 {
+                            (b'*', b'|')
+                        } else {
+                            (b'^', b'|')
+                        };
+                        g.put(x, r0 - 2, cap, hsl(l_arch, 100.0, 84.0), hit.dist);
+                        g.put(x, r0 - 1, stem, hsl(l_arch, 100.0, 58.0), hit.dist);
                     } else if arch == 1 && h >= 25.0 && sn < 0.5 && r0 >= 1 {
                         g.put(x, r0 - 1, b'H',
-                              hsl(hue, 70.0, 34.0 + 14.0 * b), hit.dist);
+                              hsl(l_arch, 70.0, 34.0 + 14.0 * b), hit.dist);
                     }
                 } else if u6 % 3 == 1 {
                     glyph = b':';
@@ -722,6 +1053,19 @@ impl Renderer {
             }
             if glyph != b' ' {
                 g.put(x, y, glyph, colour, hit.dist);
+                // **Only a board that actually made it on to the screen.** The
+                // wall pass marches near to far, and a facade BEHIND a nearer
+                // one still runs the band branch — its `put` is thrown out by
+                // the depth buffer, but a record of it would send `fascias` off
+                // to test a cell that belongs to something else entirely and
+                // find it, correctly, not clear. Nothing would ever be written.
+                // Asking the depth buffer what won is the honest test and it is
+                // one compare.
+                if let Some(sc) = sign_at {
+                    if g.depth_at(x, y) == hit.dist {
+                        self.sign_cols[x as usize] = Some(sc);
+                    }
+                }
             }
         }
         r0
@@ -1424,7 +1768,7 @@ impl Renderer {
         let hue = c.hue as f32;
         let lit_p = c.lit as f32 / 100.0;
         let dim = 0.07 + 0.27 * fb;
-        let style = match c.arch { 1 => 3u8, 2 => 0, 3 => 2, _ => c.win };
+        let style = match c.arch & crate::world::ARCH_SHAPE { 1 => 3u8, 2 => 0, 3 => 2, _ => c.win };
         for y in r0..=r1 {
             let wy = proj.height_at(y as usize, hit.dist);
             let uq = (0.55 * hit.along).floor() as i32;
@@ -2400,7 +2744,19 @@ fn shaft_glyph(
             if !(0.75..1.95).contains(&rel) || !(1.15..2.55).contains(&u) {
                 return (b'+', hsl(44.0, 30.0, 16.0 + 14.0 * b));
             }
-            let gx = (((u - 1.15) / 1.4) * 7.0) as i32;
+            // `u` runs with raw `along`, the world coordinate the DDA hit —
+            // not with which way that happens to fall on SCREEN. Which way
+            // is which flips with the building's own orientation: for two of
+            // the four ways an entrance can face, world-`along` increases
+            // the same way the screen does; for the other two it runs
+            // backwards, and a floor number stencilled straight off `gx`
+            // came out held up to a mirror — the tens and ones swapped AND
+            // every digit's own strokes flipped. `room.ix`/`room.iz` are the
+            // shaft's own inward axis and turn together with which way
+            // `along` runs (measured directly off the raycaster's hits, not
+            // derived), so their sign is the correction.
+            let gx_raw = (((u - 1.15) / 1.4) * 7.0) as i32;
+            let gx = if room.ix - room.iz < 0 { 6 - gx_raw } else { gx_raw };
             let gy = ((((1.95 - rel) / 1.2) * 5.0) as i32).clamp(0, 4) as usize;
             let n = s.floor.clamp(0, 99);
             // A seven-wide field either way, so a floor number is the same size

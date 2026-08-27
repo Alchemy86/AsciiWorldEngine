@@ -21,6 +21,11 @@ use asciicity::{grid_to_ansi, grid_to_svg, grid_to_text, Camera, Engine};
 
 /// A terminal character is about twice as tall as it is wide. That ratio is
 /// the whole of what the projection needs to know about the display.
+/// How far the `N` pointer will look for a lift. Two hundred paces is several
+/// blocks; better than half the tall stock has one, so it almost never gets
+/// anywhere near this before it finds one.
+const NEAREST_LIFT_RANGE: i32 = 200;
+
 const CELL_W: f32 = 1.0;
 const CELL_H: f32 = 2.0;
 
@@ -86,6 +91,8 @@ fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut mode = "play";
     let mut demo = false;
+    let mut ride = false;
+    let mut pick = "nearest";
     let mut i = 0;
     while i < argv.len() {
         let s = argv[i].as_str();
@@ -97,6 +104,7 @@ fn main() {
             "--help" | "-h" => return help(),
             "--bench" => mode = "bench",
             "--demo" | "--wander" => demo = true,
+            "--lift-ride" | "--ride" => ride = true,
             "--vista" => mode = "vista",
             "--capture" => mode = "capture",
             "--film" => mode = "film",
@@ -109,6 +117,9 @@ fn main() {
             "--plate-shot" => mode = "plate-shot",
             "--doorway" => mode = "doorway",
             "--lift" => mode = "lift",
+            "--wayfind" => mode = "wayfind",
+            "--tallest" => pick = "tallest",
+            "--landmark" => pick = "landmark",
             "--indoors" => a.indoors = true,
             "--lift-bench" => a.in_lift = true,
             "--cols" => a.cols = next(&mut i).parse().ok(),
@@ -183,7 +194,8 @@ fn main() {
         "plate-shot" => plate_shot(&a),
         "doorway" => doorway(&a),
         "lift" => lift_shot(&a),
-        _ => play(&a, demo),
+        "wayfind" => wayfind_shot(&a, pick),
+        _ => play(&a, demo, ride),
     }
 }
 
@@ -193,7 +205,8 @@ fn help() {
          renderer are all Rust; this binary only reads keys and paints bytes.\n\n\
          USAGE\n  \
            asciicity                 walk the city (sizes itself to the terminal)\n  \
-           asciicity --demo          the city walks itself; any key takes over\n  \
+           asciicity --demo          the city walks itself; any key takes over
+  asciicity --ride          load straight into a glass lift and ride it\n  \
            asciicity --bench         per-frame cost: sim / cast / render / paint\n  \
            asciicity --vista         one skyline frame -> .svg and .txt\n  \
            asciicity --capture       a scripted walk -> frames on disk\n  \
@@ -208,7 +221,16 @@ fn help() {
            R F                look up / down         space or shift   sprint\n  \
            E C / PgUp PgDn    rise / sink            V     street <-> elevated vista\n  \
            X or Enter         act on whatever is in reach — in a lift car that\n      \
-             is the panel under your hand, and it takes you up or down\n  \
+             is the panel under your hand. ONE press commits the car to the\n      \
+             whole journey and lets go of you, so you can turn round and\n      \
+             watch the city while it climbs; press again to pull up at the\n      \
+             next floor, or the button at the other end to turn round\n  \
+           L                  ride mode: get in a lift and let it run itself, up\n      \
+             and down, while you just look. L again gets off, so does touching\n      \
+             the panel, and it stands at each end long enough to walk out of\n  \
+           N                  the nearest lift: which building, which way and\n      \
+             how far. A pointer, not a map — the city has no edge, so\n      \
+             wandering is not a plan\n  \
            T                  weather: clear / rain / downpour\n  \
            Tab                lock a walk on, so you can look around while moving\n  \
            M                  hand over to the autopilot (any other key takes back)\n  \
@@ -327,7 +349,7 @@ registrations. Pass --plates or --plates-file for your own.",
 }
 
 // --- interactive ---------------------------------------------------------
-fn play(a: &Args, demo: bool) {
+fn play(a: &Args, demo: bool, ride: bool) {
     let term = match RawTerm::enter() {
         Ok(t) => t,
         Err(e) => {
@@ -354,9 +376,15 @@ fn play(a: &Args, demo: bool) {
     let mut fps_t = Instant::now();
     let mut fps_n = 0u32;
     let mut fps = 0.0f32;
-    let mut note = String::new();
     let mut auto_walk = false;
     let mut pilot = if demo { Some(Autopilot::new(a.seed as u64)) } else { None };
+    // **Ride mode from the command line.** Walk into a lift and put it on a
+    // loop, so the thing on screen at the first frame is the view out of a
+    // moving glass car. `L` does the same thing from inside the game.
+    let mut note = String::new();
+    if ride {
+        note = format!("  {}", start_ride(&mut eng, a.seed));
+    }
     // Shown until the player touches anything, or long enough to have read it.
     let mut advice = if term.kitty { String::new() } else { fallback_advice() };
     let started = Instant::now();
@@ -395,6 +423,34 @@ fn play(a: &Args, demo: bool) {
         }
         if kb.tapped(b't' as u32) {
             note = format!("  weather: {}", eng.cycle_weather());
+        }
+        // **Where is the nearest lift?** A pointer, not a map and not a
+        // teleport: it names the building, says which way it lies and roughly
+        // how far, and leaves the walking to you. The city is unbounded, so
+        // without it the only way to find one is to wander.
+        if kb.tapped(b'n' as u32) {
+            note = match eng.nearest_lift(NEAREST_LIFT_RANGE) {
+                Some(w) => format!(
+                    "  nearest lift: {} — {} paces {}, {} ({} floors{})",
+                    w.name(),
+                    w.dist.round() as i32,
+                    w.compass(eng.cam.x, eng.cam.z),
+                    w.hand(eng.cam.x, eng.cam.z, eng.cam.yaw),
+                    w.floors,
+                    if w.landmark { ", a landmark — look for the gold crown" } else { "" },
+                ),
+                None => format!("  no lift within {NEAREST_LIFT_RANGE} paces"),
+            };
+        }
+        // **Ride mode.** In a car already, it puts that one on a loop; anywhere
+        // else it goes and finds a lift first. Pressing it again gets off.
+        if kb.tapped(b'l' as u32) {
+            note = if eng.lift().is_some_and(|l| l.shuttling()) {
+                eng.set_lift_ride(false);
+                "  ride mode off — the car is yours".into()
+            } else {
+                format!("  {}", start_ride(&mut eng, a.seed))
+            };
         }
         if kb.tapped(b'p' as u32) {
             let stem = write_frame(&eng, &a.out, "snapshot", "AsciiWorldEngine — snapshot");
@@ -460,16 +516,14 @@ fn play(a: &Args, demo: bool) {
                     Some(l) if l.moving() => format!(" -> {}", l.target),
                     _ => String::new(),
                 };
-                match eng.interaction() {
+                match eng.act_prompt() {
                     // The act key is named here rather than left to be
                     // discovered: it is the only key in the game whose meaning
-                    // depends on where you are standing.
-                    Some((f, _)) => format!(
-                        "{}{riding} · [X] {} {}",
-                        r.label_str(),
-                        f.kind.verb(),
-                        f.kind.label()
-                    ),
+                    // depends on where you are standing — and, in a car that is
+                    // already travelling, on what the car is doing.
+                    Some((verb, what)) => {
+                        format!("{}{riding} · [X] {verb} {what}", r.label_str())
+                    }
                     None => format!("{}{riding}", r.label_str()),
                 }
             }
@@ -1321,10 +1375,15 @@ fn doorway(a: &Args) {
 /// to the landing, and in. The two moves it makes by hand — turning to face the
 /// landing doors, and turning to face the shaft once inside — are the same kind
 /// of move `--bench --indoors` already makes to get through a door.
-fn bench_into_lift(eng: &mut Engine, seed: u32) {
-    let Some((dx, dz, face)) = tallest_lift(eng, 120) else {
-        eprintln!("no lift within 120 cells of the spawn for seed {seed}");
-        std::process::exit(1);
+/// **In off the street and into the car, with the real keys.** The two camera
+/// moves it makes by hand — squaring up to the entrance, and squaring up to the
+/// landing doors once inside — are placements, not movement: everything between
+/// them is `step` with the forward bit, through the real collision and the real
+/// portals. Shared by `--bench --lift-bench` and by ride mode, so both get into
+/// a lift the way a player does and neither has its own copy of it.
+fn walk_into_the_car(eng: &mut Engine, radius: i32) -> Result<(), &'static str> {
+    let Some((dx, dz, face)) = tallest_lift(eng, radius) else {
+        return Err("no lift near the spawn");
     };
     let (ix, iz) = asciicity::interior::INWARD[face as usize];
     eng.cam.x = (dx - ix) as f32 + 0.5;
@@ -1341,10 +1400,11 @@ fn bench_into_lift(eng: &mut Engine, seed: u32) {
         eng.step(1.0 / 60.0, key::FWD, 0.0, 0.0);
     }
     let Some(room) = eng.room() else {
-        eprintln!("could not get inside to bench the lift");
-        std::process::exit(1);
+        return Err("walked at the door and never got in");
     };
-    let core = room.core.expect("a lift building with no core");
+    let Some(core) = room.core else {
+        return Err("a lift building with no core");
+    };
     let (la, ld) = core.landing()[0];
     let plus_a = core.door_a == core.a0;
     let approach = room.point_of(la as f32 + if plus_a { -0.6 } else { 1.6 }, ld as f32 + 0.5);
@@ -1360,7 +1420,49 @@ fn bench_into_lift(eng: &mut Engine, seed: u32) {
         }
     }
     if eng.lift().is_none() {
-        eprintln!("could not get into the car to bench it");
+        return Err("walked into the landing and never got into the car");
+    }
+    Ok(())
+}
+
+/// **Ride mode, started from wherever the player is.** In a car already, that
+/// car goes on the loop; anywhere else it walks into one first, with the real
+/// keys, through `walk_into_the_car`. Returns the line to put on the HUD.
+///
+/// It is `--demo`'s bargain applied to the lift: the world model drives, the
+/// player keeps the camera the whole way, and one touch of the panel — or `L`
+/// again — hands the controls back.
+fn start_ride(eng: &mut Engine, seed: u32) -> String {
+    if eng.lift().is_none() {
+        if let Err(e) = walk_into_the_car(eng, 120) {
+            return format!("no lift to ride: {e}");
+        }
+    }
+    if !eng.set_lift_ride(true) {
+        return "no lift to ride".into();
+    }
+    // Facing the shaft, back against the outward glass, which is the view this
+    // mode exists for. The player can turn round the instant the frame is up.
+    if let Some(car) = eng.room() {
+        let stand = car.point_of(asciicity::lift::CORE_W as f32 * 0.5, 1.35);
+        let look = car.point_of(asciicity::lift::CORE_W as f32 * 0.5, 6.0);
+        eng.cam.x = stand.0;
+        eng.cam.z = stand.1;
+        eng.cam.yaw = (look.0 - stand.0).atan2(-(look.1 - stand.1));
+        eng.cam.pitch = -0.18;
+        eng.cam.halt();
+    }
+    eng.step(0.0, 0, 0.0, 0.0);
+    let _ = seed;
+    match eng.room() {
+        Some(r) => format!("ride mode: {} — L again to get off", r.label_str()),
+        None => "ride mode".into(),
+    }
+}
+
+fn bench_into_lift(eng: &mut Engine, seed: u32) {
+    if let Err(e) = walk_into_the_car(eng, 120) {
+        eprintln!("{e} for seed {seed}");
         std::process::exit(1);
     }
     // Stand at the up button, facing the shaft — the frame this is measuring.
@@ -1544,34 +1646,56 @@ fn lift_shot(a: &Args) {
     shot(&mut eng, "lift-2-car", "in the car, doors open on the ground floor");
 
     // --- the ride ---------------------------------------------------------
-    // Press the up button, and press it again on the way so the car keeps
-    // going. One press is one floor; the second and third extend the ride.
+    // **One press, and then hands off.** That is the thing this frame is
+    // evidence of: the act bit is set on exactly one frame of the whole climb,
+    // and every camera move after it is a look-around a player could make with
+    // both hands free. A ride that needed the key held could not produce these
+    // pictures at all, because the player would be facing the button.
     let floors = eng.room().map(|r| r.storeys.len()).unwrap_or(0);
     let want = (floors - 1).min(5);
     let half = eng.room().map(|r| r.storeys[want].base * 0.5).unwrap_or(0.0);
-    let mut pressed = 0;
+    let brake_at = eng.room().map(|r| r.storeys[want].base).unwrap_or(0.0);
+    eng.step(1.0 / 60.0, key::ACT, 0.0, 0.0);
+    let sent = eng.lift().copied().expect("out of the car at the panel");
+    eprintln!(
+        "  one press: committed to floor {} of {}, {} — hands free from here",
+        sent.target,
+        floors - 1,
+        if sent.riding() { "riding" } else { "NOT riding" }
+    );
+    let mut acts = 1;
     let mut mid_taken = false;
-    for i in 0..2400 {
-        let idle = eng.lift().map(|l| !l.moving()).unwrap_or(true);
-        let bits = if pressed < want && (idle || i % 24 == 12) { key::ACT } else { 0 };
-        if bits != 0 {
-            pressed += 1;
-        }
-        eng.step(1.0 / 60.0, bits, 0.0, 0.0);
+    let mut braked = false;
+    for _ in 0..6000 {
         let l = eng.lift().copied();
         let Some(l) = l else { break };
-        // Mid-rise: half way up the whole climb, and moving.
+        // Mid-rise, half way up the climb and moving: turn to the shaft, then
+        // turn right round to the street. No act bit, no held key, nothing but
+        // the camera — which is the whole claim.
         if !mid_taken && l.moving() && l.y >= half {
             mid_taken = true;
-            // In the middle of the car, where a passenger stands, so both of
-            // its walls frame the shot.
             face_shaft(&mut eng);
-            shot(&mut eng, "lift-3-rise-floors", "mid-rise: the floors going past");
+            shot(&mut eng, "lift-3-rise-floors", "mid-rise, hands free: the floors going past");
             face_street(&mut eng);
-            shot(&mut eng, "lift-4-rise-street", "the same moment: the street falling away");
+            shot(
+                &mut eng,
+                "lift-4-rise-street",
+                "the same moment, still riding: turned right round to the street",
+            );
             face_shaft(&mut eng);
         }
-        if pressed >= want && !l.moving() && l.at == want {
+        // Coming up on the floor we want: the SECOND press is the brake, and
+        // it pulls the car up at the next landing rather than between floors.
+        let bits = if !braked && mid_taken && l.y >= brake_at - 6.0 && l.riding() {
+            braked = true;
+            acts += 1;
+            eprintln!("  second press at {:.1} units — the brake", l.y);
+            key::ACT
+        } else {
+            0
+        };
+        eng.step(1.0 / 60.0, bits, 0.0, 0.0);
+        if braked && !eng.lift().map(|l| l.moving()).unwrap_or(false) {
             break;
         }
     }
@@ -1579,7 +1703,12 @@ fn lift_shot(a: &Args) {
         eprintln!("WARNING: the car never reached the mid-rise moment");
     }
     let l = eng.lift().copied().expect("out of the car during the ride");
-    eprintln!("  arrived: floor {} of {}, car floor at {:.1} units", l.at, floors - 1, l.y);
+    eprintln!(
+        "  arrived: floor {} of {}, car floor at {:.1} units — {acts} presses for the whole ride",
+        l.at,
+        floors - 1,
+        l.y
+    );
     {
         // Facing the doors that have just opened, from the far side of the car.
         let car = eng.room().unwrap();
@@ -1656,10 +1785,258 @@ fn face_the_room(eng: &mut Engine) {
     eng.step(0.0, 0, 0.0, 0.0);
 }
 
+/// **Wayfinding, as evidence.** The same shape `--plate-shot`, `--doorway` and
+/// `--lift` take, and for the same reason: `--vista` and `--capture` pick their
+/// frame on the shape of the CITY, so whether a lift building is in view is
+/// luck.
+///
+/// It answers the question the whole feature exists for — *how do I find a
+/// lift* — by actually doing it. It asks the pointer where one is, shoots the
+/// building from far, middle and near so the degrade can be judged, then WALKS
+/// there from the spawn with the real keys, steering by nothing but the
+/// pointer, and shoots it from the pavement with its name on it. If that walk
+/// does not arrive, the feature is not finished and this says so.
+fn wayfind_shot(a: &Args, pick: &str) {
+    let cols = a.cols.unwrap_or(180);
+    let rows = a.rows.unwrap_or(60);
+    let mut eng = make(a, cols, rows);
+    let (spawn_x, spawn_z) = (eng.cam.x, eng.cam.z);
+
+    let shot = |eng: &mut Engine, name: &str, what: &str| {
+        eng.render();
+        let title = format!("ASCII City (our Rust engine) — {what}");
+        let stem = write_frame(eng, &a.out, name, &title);
+        eprintln!("{stem}.svg  {what}");
+    };
+
+    // --- what the pointer says, from where you are standing ---------------
+    let Some(w) = eng.nearest_lift(NEAREST_LIFT_RANGE) else {
+        eprintln!("no lift within {NEAREST_LIFT_RANGE} paces of the spawn for seed {}", a.seed);
+        std::process::exit(1);
+    };
+    eprintln!("  spawn at {spawn_x:.1},{spawn_z:.1}");
+    eprintln!(
+        "  [N] nearest lift: {} — {} paces {}, {} ({} floors{})",
+        w.name(),
+        w.dist.round() as i32,
+        w.compass(eng.cam.x, eng.cam.z),
+        w.hand(eng.cam.x, eng.cam.z, eng.cam.yaw),
+        w.floors,
+        if w.landmark { ", a landmark" } else { "" },
+    );
+
+    // The building to photograph. The pointer's answer by default; `--tallest`
+    // takes the one `--lift` takes, which is how a named building — ORBIT
+    // GALLERY on seed 23 — can be asked for by name in effect.
+    let (tx, tz, face) = if pick == "landmark" {
+        match tallest_lift_where(&eng, 200, true) {
+            Some(t) => t,
+            None => {
+                eprintln!("no landmark within 200 cells of the spawn for seed {}", a.seed);
+                std::process::exit(1);
+            }
+        }
+    } else if pick == "tallest" {
+        match tallest_lift(&eng, 120) {
+            Some(t) => t,
+            None => {
+                eprintln!("no lift within 120 cells of the spawn for seed {}", a.seed);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        (w.x, w.z, eng.world.city_cell(w.x, w.z).door - 1)
+    };
+    let target = eng.world.city_cell(tx, tz);
+    let bld = asciicity::palette::building_of(tx, tz, target.plan, asciicity::world::BLOCK, eng.world.grain);
+    // As it is written on the front of it.
+    let label = format!(
+        "{} {}",
+        core::str::from_utf8(&bld.name[..bld.name_len]).unwrap_or(""),
+        asciicity::interior::ground_room(
+            tx.div_euclid(asciicity::world::BLOCK),
+            tz.div_euclid(asciicity::world::BLOCK),
+            target.plan,
+            eng.world.seed,
+        )
+        .word()
+    );
+    eprintln!(
+        "  photographing {} at {tx},{tz} — {} storeys",
+        label,
+        eng.world.storeys(asciicity::Site {
+            seed: eng.world.seed,
+            dx: tx,
+            dz: tz,
+            face,
+            plan: target.plan,
+            grain: eng.world.grain,
+        })
+        .len()
+    );
+
+    // --- the building, at three distances ---------------------------------
+    // Straight out from its own entrance, which is the one line that is
+    // guaranteed to be roadway rather than the back of something else.
+    let (ix, iz) = asciicity::interior::INWARD[face as usize];
+    // Out into the road, then ALONG it. Straight back from an entrance is
+    // roadway for about eight units and then it is the building opposite, so a
+    // "far" frame taken on that line is a picture of somebody else's wall; the
+    // long view of a building is down the avenue it stands on.
+    let (ax, az) = (iz, -ix);
+    let stand = |eng: &mut Engine, out: f32, along: f32, eye: f32| {
+        eng.cam.x = tx as f32 + 0.5 - ix as f32 * out + ax as f32 * along;
+        eng.cam.z = tz as f32 + 0.5 - iz as f32 * out + az as f32 * along;
+        let (dx, dz) = (tx as f32 + 0.5 - eng.cam.x, tz as f32 + 0.5 - eng.cam.z);
+        eng.cam.yaw = dx.atan2(-dz);
+        eng.cam.pitch = (0.42 * (24.0 / dx.hypot(dz)).min(1.0)).max(0.06);
+        eng.cam.ground = 0.0;
+        eng.cam.eye_target = eye;
+        eng.cam.eye = eye;
+        eng.cam.halt();
+        eng.step(0.0, 0, 0.0, 0.0);
+    };
+    for (out, along, eye, name, what) in [
+        // **From the deck, which is where a skyline is.** A setback cannot be
+        // seen from a pavement — from down there a tower is a face — so the
+        // frame that judges the SHAPE is taken from the elevated vista, the
+        // same place `docs/silhouettes.png` judges the other six from.
+        (40.0, 96.0, asciicity::camera::EYE_VISTA, "wayfind-0-skyline", "from the vista deck: the shape, at a distance no word survives"),
+        (6.0, 70.0, 7.0, "wayfind-1-far", "far, down the avenue: nothing on it is readable"),
+        (6.0, 26.0, 3.0, "wayfind-2-middle", "middle: the name coming up"),
+        (8.0, 0.0, 1.7, "wayfind-3-near", "near: the name on the fascia, from the pavement"),
+    ] {
+        stand(&mut eng, out, along, eye);
+        shot(&mut eng, name, &format!("{label} — {what}"));
+    }
+
+    // --- and now WALK there, steering by the pointer alone -----------------
+    // Back to the spawn the game itself would have put you on.
+    let mut fresh = make(a, cols, rows);
+    std::mem::swap(&mut eng, &mut fresh);
+    eng.step(0.0, 0, 0.0, 0.0);
+    // Aim at the pavement OUTSIDE the door rather than at the threshold cell
+    // itself: walking at a doorway from the street means standing in front of
+    // it first, and the last pace through is the portal's own business.
+    let goal = (tx as f32 + 0.5 - ix as f32 * 1.2, tz as f32 + 0.5 - iz as f32 * 1.2);
+    let mut arrived = false;
+    let mut said = 0.0f32;
+    let mut dodge: Option<i32> = None;
+    // Which hand this walk keeps to when it has to go round something, and how
+    // long it has gone without getting any closer. A wall-follower that always
+    // turns the same way can circle a block for ever — seed 90210 did, thirty
+    // paces from the door — so when the range stops improving it swaps hands.
+    let mut hand = 0i32;
+    let mut best = f32::MAX;
+    let mut stale = 0u32;
+    for i in 0..40_000 {
+        if eng.world.indoors() {
+            arrived = true;
+            break;
+        }
+        let (dx, dz) = (goal.0 - eng.cam.x, goal.1 - eng.cam.z);
+        let range = dx.hypot(dz);
+        if range < 1.4 {
+            arrived = true;
+            break;
+        }
+        if said == 0.0 || (said - range) > 40.0 {
+            said = range;
+            eprintln!("    walking: {:.0} paces to go", range);
+        }
+        if range < best - 0.5 {
+            best = range;
+            stale = 0;
+        } else {
+            stale += 1;
+            if stale > 1500 {
+                stale = 0;
+                hand = if hand >= 0 { -1 } else { 1 };
+                dodge = None;
+                eprintln!("    going nowhere; trying the other way round");
+            }
+        }
+        let want = dx.atan2(-dz);
+        let mut turn = want - eng.cam.yaw;
+        while turn > std::f32::consts::PI {
+            turn -= std::f32::consts::TAU;
+        }
+        while turn < -std::f32::consts::PI {
+            turn += std::f32::consts::TAU;
+        }
+        // Steer at it, and when a building is in the way go ALONG the street
+        // instead of into the wall — the same probe the attract mode uses, and
+        // the same lesson: a forced turn has to run until there is road ahead
+        // rather than for a fixed time, or it rocks side to side in a corner
+        // for ever. `dodge` is that hysteresis; without it this walk wedged 154
+        // paces short of the door and stayed there.
+        let ahead = Autopilot::clearance(&eng.world, &eng.cam, eng.cam.yaw);
+        let bits = if let Some(d) = dodge {
+            if ahead > 9.0 && turn.abs() < 1.3 {
+                dodge = None;
+                key::FWD
+            } else if ahead > 4.5 {
+                key::FWD | if d > 0 { key::TURN_R } else { key::TURN_L }
+            } else {
+                if d > 0 { key::TURN_R } else { key::TURN_L }
+            }
+        } else if ahead < 3.0 {
+            // Blocked. Go the way that opens up, and keep going that way.
+            let l = Autopilot::clearance(&eng.world, &eng.cam, eng.cam.yaw - 1.5708);
+            let r = Autopilot::clearance(&eng.world, &eng.cam, eng.cam.yaw + 1.5708);
+            dodge = Some(if hand != 0 { hand } else if r > l { 1 } else { -1 });
+            0
+        } else if turn.abs() > 0.09 {
+            key::FWD | if turn > 0.0 { key::TURN_R } else { key::TURN_L }
+        } else {
+            key::FWD
+        };
+        eng.step(1.0 / 60.0, bits, 0.0, 0.0);
+        let _ = i;
+    }
+    if !arrived {
+        // The pointer is a bearing and a distance; getting there past the
+        // blocks in between is this walker's problem, not the pointer's, and
+        // saying otherwise would be blaming the wrong thing.
+        eprintln!("  never reached it on foot — this tool's walker gave up, not the pointer");
+        std::process::exit(1);
+    }
+    // Out of the doorway and back on to the pavement, facing the building, so
+    // the last frame is the one a player would be looking at.
+    if eng.world.indoors() {
+        for _ in 0..400 {
+            eng.step(1.0 / 60.0, key::BACK, 0.0, 0.0);
+            if !eng.world.indoors() {
+                break;
+            }
+        }
+    }
+    stand(&mut eng, 8.0, 0.0, 1.7);
+    eprintln!(
+        "  arrived on foot at {:.1},{:.1}; the pointer now says {} paces",
+        eng.cam.x,
+        eng.cam.z,
+        eng.nearest_lift(NEAREST_LIFT_RANGE).map(|n| n.dist.round() as i32).unwrap_or(-1)
+    );
+    shot(
+        &mut eng,
+        "wayfind-4-arrived",
+        &format!("{label} — walked to by the pointer, from the pavement"),
+    );
+}
+
 /// The entrance within `radius` whose building the world generator gave the
 /// MOST floors. A lift with four stops proves the mechanism; a lift with nine
 /// is a picture of one.
 fn tallest_lift(eng: &Engine, radius: i32) -> Option<(i32, i32, u8)> {
+    tallest_lift_where(eng, radius, false)
+}
+
+/// The same, but `landmark` narrows it to the buildings the generator gave the
+/// seventh silhouette to — the ones you are meant to be able to pick out of a
+/// skyline. `--wayfind --landmark` is how the shape gets photographed from far
+/// enough away that no word on it could be read.
+fn tallest_lift_where(eng: &Engine, radius: i32, landmark: bool) -> Option<(i32, i32, u8)> {
     let (cx, cz) = (eng.cam.x.floor() as i32, eng.cam.z.floor() as i32);
     let mut best: Option<(usize, i32, i32, u8)> = None;
     for z in cz - radius..=cz + radius {
@@ -1667,6 +2044,13 @@ fn tallest_lift(eng: &Engine, radius: i32) -> Option<(i32, i32, u8)> {
             let c = eng.world.city_cell(x, z);
             if c.door == 0 || c.door > 4 {
                 continue;
+            }
+            if landmark {
+                let (ix, iz) = asciicity::interior::INWARD[(c.door - 1) as usize];
+                let back = eng.world.city_cell(x + ix, z + iz);
+                if back.arch & asciicity::world::ARCH_LIFT == 0 {
+                    continue;
+                }
             }
             let site = asciicity::Site {
                 seed: eng.world.seed,

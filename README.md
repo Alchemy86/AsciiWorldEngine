@@ -52,8 +52,13 @@ straight through — `./play --demo`, `./play --help`, and every flag below.
 | `E` `C` / PgUp PgDn | rise / sink | `V` | street ↔ elevated vista |
 | `T` | weather: clear / rain / downpour | `Tab` | lock a walk on |
 | `X` or Enter | act on what is in reach — the lift panel | `M` | hand over to the autopilot |
+| `N` | the nearest lift: which building, which way, how far | `L` | ride mode: let a lift run itself |
 | `P` | write the frame to disk | | |
 | `Q` or Esc | quit | | |
+
+One press of `X` in a lift **commits the car to the whole journey** and lets go
+of you, so you can turn round and watch the city while it climbs; press again to
+pull up at the next floor, or the button at the other end to turn round.
 
 Keys are held for exactly as long as your finger is on them in any terminal
 that speaks the kitty keyboard protocol, and there is a measured fallback for
@@ -85,6 +90,8 @@ Every one of these is a real frame out of the engine, same seed, same city.
 ./play --vista --out shots --name skyline     # one skyline frame, to .svg and .txt
 ./play --doorway --out shots                  # in through a door and back out, as frames
 ./play --lift --out shots                     # into the lift, up it, and out on to a floor
+./play --ride                                 # load straight into a glass lift and just look
+./play --wayfind --landmark --out shots       # find a lift building, and walk to it
 ./play --film --weather rain --out frames     # every tick, ready for ffmpeg
 ./play --bench                                # per-frame cost: sim / cast / render / paint
 ```
@@ -112,6 +119,7 @@ Every one of these is a real frame out of the engine, same seed, same city.
 | [Generating the city](docs/world-generation.md) | blocks and plots, six building silhouettes, the `--variety` knob |
 | [Doors, rooms and windows](docs/interiors.md) | how inside and outside are one mode, and how you see out |
 | [A glass lift](docs/lift.md) | which buildings get one, the panel, and the floors going past |
+| [Finding your way](docs/wayfinding.md) | names on facades, the seventh silhouette, and the `N` pointer |
 | [Registration plates](docs/registration-plates.md) | drawn out of characters, sized to the registration, honest at distance — the idea came from [regtransfers.co.uk](https://www.regtransfers.co.uk/) |
 | [Weather and what is on the pavement](docs/weather-and-streets.md) | rain, stars, lamps, trees |
 | [Recording a film](docs/film.md) | `--film`, the script format, the ffmpeg pipeline |
