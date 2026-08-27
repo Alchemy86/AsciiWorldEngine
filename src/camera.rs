@@ -28,6 +28,11 @@ pub mod key {
     pub const LOOK_DOWN: u32 = 1 << 8;
     pub const RISE: u32 = 1 << 9;
     pub const SINK: u32 = 1 << 10;
+    /// **Act on whatever is within reach.** The one interaction bit this engine
+    /// has: what it does is decided by the world model, not by the key — see
+    /// `Engine::act`. Edge-triggered inside the engine, so holding it down
+    /// presses once.
+    pub const ACT: u32 = 1 << 11;
 }
 
 /// Standing eye height, world units.
@@ -62,6 +67,17 @@ pub struct Camera {
     /// Where the eye is heading; `eye` eases toward it so a view change reads
     /// as a rise rather than a cut.
     pub eye_target: f32,
+    /// **World height of the floor you are standing on.** Zero on the street,
+    /// the room's slab indoors, and the car's slab — which moves — in a lift.
+    ///
+    /// It exists because `airborne` is the question "have I left the ground",
+    /// and the ground is not always at zero. Comparing `eye` against street
+    /// level instead means a camera on the fifth floor is twenty units up and
+    /// therefore flying, with collision switched off: you walk through the
+    /// walls of every room a lift can reach, and out through the side of a
+    /// rising lift car. Found by
+    /// `the_doors_are_shut_while_the_car_is_moving_and_open_on_to_that_floor_when_it_stops`.
+    pub ground: f32,
 
     /// Current ground velocity, world units per second. Movement is a velocity
     /// the keys steer, not a displacement they apply, so it can outlive the
@@ -101,6 +117,7 @@ impl Camera {
             pitch: 0.0,
             eye: EYE_STREET,
             eye_target: EYE_STREET,
+            ground: 0.0,
             vx: 0.0,
             vz: 0.0,
             last_keys: 0,
@@ -121,14 +138,17 @@ impl Camera {
         (self.yaw.cos(), self.yaw.sin())
     }
 
-    /// True once the eye has climbed clear of street level.
+    /// True once the eye has climbed clear of the floor it is standing on.
+    /// Above that, collision stops applying — that is the elevated vista — so
+    /// this has to be measured from `ground` and not from zero.
     #[inline]
     pub fn airborne(&self) -> bool {
-        self.eye > EYE_STREET + 0.5
+        self.eye > self.ground + EYE_STREET + 0.5
     }
 
     pub fn toggle_vista(&mut self) {
-        self.eye_target = if self.eye_target > EYE_STREET + 0.5 { EYE_STREET } else { EYE_VISTA };
+        self.eye_target =
+            if self.eye_target > self.ground + EYE_STREET + 0.5 { EYE_STREET } else { EYE_VISTA };
     }
 
     pub fn update(&mut self, world: &World, dt: f32, keys: u32, look_x: f32, look_y: f32) {
@@ -175,7 +195,7 @@ impl Camera {
             self.eye_target = (self.eye_target + RISE_SPEED * dt_in).min(140.0);
         }
         if keys & key::SINK != 0 {
-            self.eye_target = (self.eye_target - RISE_SPEED * dt_in).max(EYE_STREET);
+            self.eye_target = (self.eye_target - RISE_SPEED * dt_in).max(self.ground + EYE_STREET);
         }
         // Ease toward the target: a time-constant follow, framerate independent.
         let k = 1.0 - (-6.0 * dt).exp();

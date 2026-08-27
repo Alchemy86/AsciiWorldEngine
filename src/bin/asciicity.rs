@@ -52,6 +52,8 @@ struct Args {
     /// Bench from INSIDE a room rather than on the street. Both numbers are
     /// worth having and they are not the same number.
     indoors: bool,
+    /// Bench from inside a MOVING lift car. A third frame with a third cost.
+    in_lift: bool,
     /// A fixed camera position for `--vista`, instead of the sightline search.
     /// What makes two settings of `--variety` comparable: the same seed under
     /// two settings is not quite the same city, so a search would stand in two
@@ -78,6 +80,7 @@ fn main() {
         script: None,
         fps: 30.0,
         indoors: false,
+        in_lift: false,
         at: None,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -105,7 +108,9 @@ fn main() {
             "--fps" => a.fps = next(&mut i).parse().unwrap_or(a.fps),
             "--plate-shot" => mode = "plate-shot",
             "--doorway" => mode = "doorway",
+            "--lift" => mode = "lift",
             "--indoors" => a.indoors = true,
+            "--lift-bench" => a.in_lift = true,
             "--cols" => a.cols = next(&mut i).parse().ok(),
             "--rows" => a.rows = next(&mut i).parse().ok(),
             "--seed" => a.seed = next(&mut i).parse().unwrap_or(a.seed),
@@ -177,6 +182,7 @@ fn main() {
         "film" => film(&a),
         "plate-shot" => plate_shot(&a),
         "doorway" => doorway(&a),
+        "lift" => lift_shot(&a),
         _ => play(&a, demo),
     }
 }
@@ -194,11 +200,15 @@ fn help() {
            asciicity --film          record a walk: EVERY frame -> ffmpeg\n  \
            asciicity --plate-shot    near / middle / far plate evidence frames\n  \
            asciicity --doorway       approach / threshold / inside / window /\n      \
-             back out — evidence frames for the doors and the rooms\n\n\
+             back out — evidence frames for the doors and the rooms\n  \
+           asciicity --lift          landing / in the car / mid-rise, floors\n      \
+             one side and the street the other / arriving — the lift\n\n\
          KEYS\n  \
            W A S D / arrows   walk and strafe        J K   turn\n  \
            R F                look up / down         space or shift   sprint\n  \
            E C / PgUp PgDn    rise / sink            V     street <-> elevated vista\n  \
+           X or Enter         act on whatever is in reach — in a lift car that\n      \
+             is the panel under your hand, and it takes you up or down\n  \
            T                  weather: clear / rain / downpour\n  \
            Tab                lock a walk on, so you can look around while moving\n  \
            M                  hand over to the autopilot (any other key takes back)\n  \
@@ -239,7 +249,10 @@ fn help() {
              only comparable if they are pictures of the same place.\n  \
            --weather clear|rain|downpour\n  \
            --indoors          bench from inside a room instead of on the\n      \
-             street. Both are real frames and they do not cost the same.\n\n\
+             street. Both are real frames and they do not cost the same.\n  \
+           --lift-bench       bench from inside a MOVING lift car. A third\n      \
+             frame, a third cost; it drives the panel rather than walking,\n      \
+             because you do not walk in a lift.\n\n\
          FACADE VARIETY\n  \
            --variety 0..1     how much the generator may vary between\n      \
              NEIGHBOURING plots. A --seed has always chosen WHICH mix of\n      \
@@ -377,6 +390,9 @@ fn play(a: &Args, demo: bool) {
         if kb.tapped(9) {
             auto_walk = !auto_walk;
         }
+        if !eng.act_note.is_empty() && (kb.tapped(b'x' as u32) || kb.tapped(13)) {
+            note = format!("  {}", eng.act_note);
+        }
         if kb.tapped(b't' as u32) {
             note = format!("  weather: {}", eng.cycle_weather());
         }
@@ -439,10 +455,24 @@ fn play(a: &Args, demo: bool) {
         // that is the room's own name and whatever is within reach of you —
         // both read off the world model, not off the picture.
         let where_now = match eng.room() {
-            Some(r) => match eng.interaction() {
-                Some((f, _)) => format!("{} · {} {}", r.label_str(), f.kind.verb(), f.kind.label()),
-                None => r.label_str().to_string(),
-            },
+            Some(r) => {
+                let riding = match eng.lift() {
+                    Some(l) if l.moving() => format!(" -> {}", l.target),
+                    _ => String::new(),
+                };
+                match eng.interaction() {
+                    // The act key is named here rather than left to be
+                    // discovered: it is the only key in the game whose meaning
+                    // depends on where you are standing.
+                    Some((f, _)) => format!(
+                        "{}{riding} · [X] {} {}",
+                        r.label_str(),
+                        f.kind.verb(),
+                        f.kind.label()
+                    ),
+                    None => format!("{}{riding}", r.label_str()),
+                }
+            }
             None => eng.weather_name().to_string(),
         };
         let hud = format!(
@@ -1227,57 +1257,11 @@ fn doorway(a: &Args) {
     // Face the longest clear run in the room, the same way `camera::spawn`
     // faces the longest clear run down a street. A shot taken from wherever the
     // walk stopped is usually a picture of the back of a rack.
-    if let Some(r) = eng.room() {
-        let (px, pz) = (eng.cam.x, eng.cam.z);
-        let mut best = (-1i32, eng.cam.yaw);
-        for k in 0..16 {
-            let yaw = k as f32 * core::f32::consts::TAU / 16.0;
-            let (fx, fz) = (yaw.sin(), -yaw.cos());
-            let mut run = 0;
-            while run < 40 {
-                let (gx, gz) = (
-                    (px + fx * (run as f32 + 1.0) * 0.5).floor() as i32,
-                    (pz + fz * (run as f32 + 1.0) * 0.5).floor() as i32,
-                );
-                if !r.open(gx, gz) {
-                    break;
-                }
-                run += 1;
-            }
-            if run > best.0 {
-                best = (run, yaw);
-            }
-        }
-        eng.cam.yaw = best.1;
-        eng.cam.halt();
-    }
-    eng.step(0.0, 0, 0.0, 0.0);
+    face_the_room(&mut eng);
     if let Some(r) = eng.room() {
         // The plan, as a plan. A room read back as a picture is what makes a
-        // layout obviously right or obviously wrong; a table of numbers is
-        // not.
-        eprintln!("  plan ('#' wall, '=' glazing, 'o' furniture, '+' you, '.' floor):");
-        for gz in r.z0..r.z0 + r.wz {
-            let mut line = String::from("    ");
-            for gx in r.x0..r.x0 + r.wx {
-                let here = eng.cam.x.floor() as i32 == gx && eng.cam.z.floor() as i32 == gz;
-                let c = r.at(gx, gz).unwrap();
-                line.push(if here {
-                    '+'
-                } else if c.door != 0 {
-                    'D'
-                } else if c.height == 0 {
-                    '.'
-                } else if c.win == asciicity::interior::fit::WINDOW {
-                    '='
-                } else if c.win == asciicity::interior::fit::WALL {
-                    '#'
-                } else {
-                    'o'
-                });
-            }
-            eprintln!("{line}");
-        }
+        // layout obviously right or obviously wrong; a table of numbers is not.
+        print_plan(&eng);
         eprintln!(
             "  inside: {:?} \"{}\" — {}x{} cells, ceiling {:.2}, floor {}, {} windows, {} fixtures",
             r.room,
@@ -1330,6 +1314,404 @@ fn doorway(a: &Args) {
     shot(&mut eng, "door-5-back-out", "back out on the street");
     if eng.world.indoors() {
         eprintln!("WARNING: never found the way back out");
+    }
+}
+
+/// Get the bench into a lift car, the way a player does: in off the street, up
+/// to the landing, and in. The two moves it makes by hand — turning to face the
+/// landing doors, and turning to face the shaft once inside — are the same kind
+/// of move `--bench --indoors` already makes to get through a door.
+fn bench_into_lift(eng: &mut Engine, seed: u32) {
+    let Some((dx, dz, face)) = tallest_lift(eng, 120) else {
+        eprintln!("no lift within 120 cells of the spawn for seed {seed}");
+        std::process::exit(1);
+    };
+    let (ix, iz) = asciicity::interior::INWARD[face as usize];
+    eng.cam.x = (dx - ix) as f32 + 0.5;
+    eng.cam.z = (dz - iz) as f32 + 0.5;
+    eng.cam.yaw = (ix as f32).atan2(-(iz as f32));
+    eng.cam.halt();
+    for _ in 0..400 {
+        eng.step(1.0 / 60.0, key::FWD, 0.0, 0.0);
+        if eng.world.indoors() {
+            break;
+        }
+    }
+    for _ in 0..60 {
+        eng.step(1.0 / 60.0, key::FWD, 0.0, 0.0);
+    }
+    let Some(room) = eng.room() else {
+        eprintln!("could not get inside to bench the lift");
+        std::process::exit(1);
+    };
+    let core = room.core.expect("a lift building with no core");
+    let (la, ld) = core.landing()[0];
+    let plus_a = core.door_a == core.a0;
+    let approach = room.point_of(la as f32 + if plus_a { -0.6 } else { 1.6 }, ld as f32 + 0.5);
+    let inward = asciicity::interior::INWARD[core.in_face as usize];
+    eng.cam.x = approach.0;
+    eng.cam.z = approach.1;
+    eng.cam.yaw = (inward.0 as f32).atan2(-(inward.1 as f32));
+    eng.cam.halt();
+    for _ in 0..300 {
+        eng.step(1.0 / 60.0, key::FWD, 0.0, 0.0);
+        if eng.lift().is_some() {
+            break;
+        }
+    }
+    if eng.lift().is_none() {
+        eprintln!("could not get into the car to bench it");
+        std::process::exit(1);
+    }
+    // Stand at the up button, facing the shaft — the frame this is measuring.
+    let (px, pz, sx, sz) = {
+        let car = eng.room().unwrap();
+        let p = car.point_of(1.35, 1.25);
+        let s = car.point_of(asciicity::lift::CORE_W as f32 * 0.5, 6.0);
+        (p.0, p.1, s.0, s.1)
+    };
+    eng.cam.x = px;
+    eng.cam.z = pz;
+    eng.cam.yaw = (sx - px).atan2(-(sz - pz));
+    eng.cam.halt();
+    eng.step(0.0, 0, 0.0, 0.0);
+}
+
+/// **The lift, as evidence.** The same shape `--doorway` takes and for the same
+/// reason: `--vista` and `--capture` pick their frame on the shape of the CITY,
+/// so whether a lift is in view is luck.
+///
+/// It finds a building the generator gave a lift to, walks in off the street
+/// with the real keys, walks into the car with the real keys, and presses the
+/// panel with the real act bit. The two camera moves it makes by hand — turning
+/// to face the landing, and standing at the up button rather than the down one
+/// — are the same kind of move `--doorway` makes to face a window, and nothing
+/// about the ride is driven behind the engine's back.
+fn lift_shot(a: &Args) {
+    let cols = a.cols.unwrap_or(180);
+    let rows = a.rows.unwrap_or(60);
+    let mut eng = make(a, cols, rows);
+
+    // The nearest entrance whose building the generator gave a lift. Which
+    // buildings those are is a fact about the world, asked here the same way
+    // anything else asks it.
+    let Some((dx, dz, face)) = tallest_lift(&eng, 120) else {
+        eprintln!("no lift within 200 cells of the spawn for seed {}", a.seed);
+        std::process::exit(1);
+    };
+    let (ix, iz) = asciicity::interior::INWARD[face as usize];
+    let yaw_in = (ix as f32).atan2(-(iz as f32));
+
+    let shot = |eng: &mut Engine, name: &str, what: &str| {
+        eng.render();
+        let l = eng.lift().copied();
+        let title = format!(
+            "ASCII City (our Rust engine) — {what} — {}{}",
+            match eng.room() {
+                Some(r) => r.label_str().to_string(),
+                None => "the street".into(),
+            },
+            match l {
+                Some(l) => format!(
+                    " — car at {:.2} units, passing floor {}, going to {}",
+                    l.y,
+                    l.passing(&eng.room().unwrap().storeys),
+                    l.target
+                ),
+                None => String::new(),
+            }
+        );
+        let stem = write_frame(eng, &a.out, name, &title);
+        eprintln!("{stem}.svg  {what}");
+    };
+
+    // --- in off the street, the way a player does it ----------------------
+    eng.cam.x = (dx - ix) as f32 + 0.5;
+    eng.cam.z = (dz - iz) as f32 + 0.5;
+    eng.cam.yaw = yaw_in;
+    eng.cam.halt();
+    eng.step(0.0, 0, 0.0, 0.0);
+    for _ in 0..400 {
+        eng.step(1.0 / 60.0, key::FWD, 0.0, 0.0);
+        if eng.world.indoors() {
+            break;
+        }
+    }
+    for _ in 0..60 {
+        eng.step(1.0 / 60.0, key::FWD, 0.0, 0.0);
+    }
+    let Some(room) = eng.room() else {
+        eprintln!("walked at the door and never got in");
+        std::process::exit(1);
+    };
+    let core = room.core.expect("a lift building with no core");
+    eprintln!(
+        "  {} — {} storeys, core {} cells across x {} deep at a={}",
+        room.label_str(),
+        room.storeys.len(),
+        asciicity::lift::CORE_W,
+        asciicity::lift::CORE_D,
+        core.a0
+    );
+    for (i, s) in room.storeys.iter().enumerate() {
+        eprintln!(
+            "    floor {:>2}  slab {:>5.1}  clear {:.2}  {:?}",
+            s.floor, s.base, s.ceiling, s.room
+        );
+        let _ = i;
+    }
+    print_plan(&eng);
+
+    // Stand off the landing doors and face them. `door_a == a0` means walking
+    // in is walking up the `a` axis, so the room is on the low side of it.
+    let plus_a = core.door_a == core.a0;
+    let (la, ld) = core.landing()[0];
+    // Square on to the doors and as far back as the room allows. There is no
+    // standing back far enough to hold the whole core — seven cells of frontage
+    // across a fifty-seven degree field of view runs out of frame at five — but
+    // the doors are what this shot is of, and from here they are the lit recess
+    // in the middle of it with the head band and the sign over them.
+    let s = if plus_a { -1.0 } else { 1.0 };
+    let back = ((core.a0 - 1).max(1) as f32).min(4.6);
+    let approach = room.point_of(la as f32 + 0.5 + s * back, ld as f32 + 1.0);
+    let aim = room.point_of(la as f32 + 0.5, ld as f32 + 0.5);
+    eng.cam.x = approach.0;
+    eng.cam.z = approach.1;
+    eng.cam.yaw = (aim.0 - approach.0).atan2(-(aim.1 - approach.1));
+    eng.cam.halt();
+    eng.step(0.0, 0, 0.0, 0.0);
+    shot(&mut eng, "lift-1-landing", "the lift landing, from the lobby");
+
+    for _ in 0..300 {
+        eng.step(1.0 / 60.0, key::FWD, 0.0, 0.0);
+        if eng.lift().is_some() {
+            break;
+        }
+    }
+    if eng.lift().is_none() {
+        eprintln!("walked into the landing and never got into the car");
+        std::process::exit(1);
+    }
+
+    // Face the shaft: the car's inward glass, and the wall at the back of the
+    // well past it. That is the direction the floors go by in.
+    let (car_in, car_out, up_at) = {
+        let car = eng.room().unwrap();
+        let (fx, fz) = car.point_of(2.5, 6.0);
+        let (bx, bz) = car.point_of(2.5, -2.0);
+        let (ux, uz) = car.point_of(1.05, 1.6);
+        ((fx, fz), (bx, bz), (ux, uz))
+    };
+    // At the shaft, and a little down at it. Two things come into frame that
+    // are not in it looking dead level: the bottom rail of the car's own glass,
+    // and the shaft dropping away below the car.
+    // Stand at the FRONT of the car to look at the shaft and at the BACK of it
+    // to look at the street, so in both frames there is a car's width of its
+    // own floor between you and the glass. Standing in the middle of a two-cell
+    // car puts the floor under your feet and out of shot, and then a frame of
+    // the shaft is a frame of a hole in the ground.
+    let face_shaft = |eng: &mut Engine| {
+        let p = eng.room().unwrap().point_of(1.35, 1.25);
+        eng.cam.x = p.0;
+        eng.cam.z = p.1;
+        eng.cam.yaw = (car_in.0 - eng.cam.x).atan2(-(car_in.1 - eng.cam.z));
+        eng.cam.pitch = -0.26;
+        eng.cam.halt();
+        eng.step(0.0, 0, 0.0, 0.0);
+    };
+    // Out at the street, and DOWN at it: a glass lift is a thing you look down
+    // out of, and level with the horizon from the fifth floor is a picture of
+    // the building opposite. The pitch is the one the F key gives.
+    let face_street = |eng: &mut Engine| {
+        let p = eng.room().unwrap().point_of(1.35, 2.75);
+        eng.cam.x = p.0;
+        eng.cam.z = p.1;
+        eng.cam.yaw = (car_out.0 - eng.cam.x).atan2(-(car_out.1 - eng.cam.z));
+        eng.cam.pitch = -0.42;
+        eng.cam.halt();
+        eng.step(0.0, 0, 0.0, 0.0);
+    };
+    // Stand at the UP button rather than the down one. Which button is under
+    // your hand is which one you are nearest, and that is the whole of the
+    // panel's mechanism.
+    eng.cam.x = up_at.0;
+    eng.cam.z = up_at.1;
+    face_shaft(&mut eng);
+    match eng.interaction() {
+        Some((f, d)) => eprintln!("  in the car; {} {} at {:.2}", f.kind.verb(), f.kind.label(), d),
+        None => eprintln!("  in the car; nothing within reach — the panel is missed"),
+    }
+    shot(&mut eng, "lift-2-car", "in the car, doors open on the ground floor");
+
+    // --- the ride ---------------------------------------------------------
+    // Press the up button, and press it again on the way so the car keeps
+    // going. One press is one floor; the second and third extend the ride.
+    let floors = eng.room().map(|r| r.storeys.len()).unwrap_or(0);
+    let want = (floors - 1).min(5);
+    let half = eng.room().map(|r| r.storeys[want].base * 0.5).unwrap_or(0.0);
+    let mut pressed = 0;
+    let mut mid_taken = false;
+    for i in 0..2400 {
+        let idle = eng.lift().map(|l| !l.moving()).unwrap_or(true);
+        let bits = if pressed < want && (idle || i % 24 == 12) { key::ACT } else { 0 };
+        if bits != 0 {
+            pressed += 1;
+        }
+        eng.step(1.0 / 60.0, bits, 0.0, 0.0);
+        let l = eng.lift().copied();
+        let Some(l) = l else { break };
+        // Mid-rise: half way up the whole climb, and moving.
+        if !mid_taken && l.moving() && l.y >= half {
+            mid_taken = true;
+            // In the middle of the car, where a passenger stands, so both of
+            // its walls frame the shot.
+            face_shaft(&mut eng);
+            shot(&mut eng, "lift-3-rise-floors", "mid-rise: the floors going past");
+            face_street(&mut eng);
+            shot(&mut eng, "lift-4-rise-street", "the same moment: the street falling away");
+            face_shaft(&mut eng);
+        }
+        if pressed >= want && !l.moving() && l.at == want {
+            break;
+        }
+    }
+    if !mid_taken {
+        eprintln!("WARNING: the car never reached the mid-rise moment");
+    }
+    let l = eng.lift().copied().expect("out of the car during the ride");
+    eprintln!("  arrived: floor {} of {}, car floor at {:.1} units", l.at, floors - 1, l.y);
+    {
+        // Facing the doors that have just opened, from the far side of the car.
+        let car = eng.room().unwrap();
+        let door_a = car.core.unwrap().door_a as f32;
+        let stand = car.point_of(asciicity::lift::CORE_W as f32 * 0.5, 2.62);
+        let look = car.point_of(door_a + 0.5, 1.1);
+        eng.cam.x = stand.0;
+        eng.cam.z = stand.1;
+        eng.cam.yaw = (look.0 - stand.0).atan2(-(look.1 - stand.1));
+        eng.cam.pitch = 0.0;
+        eng.cam.halt();
+        eng.step(0.0, 0, 0.0, 0.0);
+    }
+    shot(&mut eng, "lift-5-arrive", "arriving: the doors line up with the landing");
+
+    // --- and out on to that floor ----------------------------------------
+    let out = asciicity::interior::INWARD[eng.room().unwrap().core.unwrap().in_face as usize];
+    eng.cam.yaw = (-out.0 as f32).atan2(out.1 as f32);
+    eng.cam.halt();
+    for _ in 0..400 {
+        eng.step(1.0 / 60.0, key::FWD, 0.0, 0.0);
+        if eng.lift().is_none() {
+            break;
+        }
+    }
+    for _ in 0..90 {
+        eng.step(1.0 / 60.0, key::FWD, 0.0, 0.0);
+    }
+    match eng.room() {
+        Some(r) if eng.lift().is_none() => eprintln!(
+            "  stepped out into {} — floor {}, slab at {:.1}",
+            r.label_str(),
+            r.floor,
+            r.base
+        ),
+        _ => eprintln!("WARNING: never got out of the car"),
+    }
+    // Face the longest clear run, the same way `--doorway` does and for the
+    // same reason: a shot from wherever the walk stopped is a picture of the
+    // back of a rack.
+    face_the_room(&mut eng);
+    shot(&mut eng, "lift-6-floor", "out of the car, on that floor");
+}
+
+/// Turn to face the longest clear run in the room. A shot taken from wherever
+/// a walk stopped is usually a picture of the back of a rack; this is the same
+/// move `camera::spawn` makes on the street, indoors.
+fn face_the_room(eng: &mut Engine) {
+    if let Some(r) = eng.room() {
+        let (px, pz) = (eng.cam.x, eng.cam.z);
+        let mut best = (-1i32, eng.cam.yaw);
+        for k in 0..24 {
+            let yaw = k as f32 * core::f32::consts::TAU / 24.0;
+            let (fx, fz) = (yaw.sin(), -yaw.cos());
+            let mut run = 0;
+            while run < 40 {
+                let (gx, gz) = (
+                    (px + fx * (run as f32 + 1.0) * 0.5).floor() as i32,
+                    (pz + fz * (run as f32 + 1.0) * 0.5).floor() as i32,
+                );
+                if !r.open(gx, gz) {
+                    break;
+                }
+                run += 1;
+            }
+            if run > best.0 {
+                best = (run, yaw);
+            }
+        }
+        eng.cam.yaw = best.1;
+        eng.cam.pitch = 0.0;
+        eng.cam.halt();
+    }
+    eng.step(0.0, 0, 0.0, 0.0);
+}
+
+/// The entrance within `radius` whose building the world generator gave the
+/// MOST floors. A lift with four stops proves the mechanism; a lift with nine
+/// is a picture of one.
+fn tallest_lift(eng: &Engine, radius: i32) -> Option<(i32, i32, u8)> {
+    let (cx, cz) = (eng.cam.x.floor() as i32, eng.cam.z.floor() as i32);
+    let mut best: Option<(usize, i32, i32, u8)> = None;
+    for z in cz - radius..=cz + radius {
+        for x in cx - radius..=cx + radius {
+            let c = eng.world.city_cell(x, z);
+            if c.door == 0 || c.door > 4 {
+                continue;
+            }
+            let site = asciicity::Site {
+                seed: eng.world.seed,
+                dx: x,
+                dz: z,
+                face: c.door - 1,
+                plan: c.plan,
+                grain: eng.world.grain,
+            };
+            let n = eng.world.storeys(site).len();
+            if n > 0 && best.is_none_or(|(m, ..)| n > m) {
+                best = Some((n, x, z, c.door - 1));
+            }
+        }
+    }
+    best.map(|(_, x, z, f)| (x, z, f))
+}
+
+/// The floor plan, as a plan. Reading a layout as a picture is what makes it
+/// obviously right or obviously wrong.
+fn print_plan(eng: &Engine) {
+    let Some(r) = eng.room() else { return };
+    eprintln!("  plan ('#' wall, '=' glazing, 'L' lift core, 'D' a way through, 'o' furniture, '+' you):");
+    for gz in r.z0..r.z0 + r.wz {
+        let mut line = String::from("    ");
+        for gx in r.x0..r.x0 + r.wx {
+            let here = eng.cam.x.floor() as i32 == gx && eng.cam.z.floor() as i32 == gz;
+            let c = r.at(gx, gz).unwrap();
+            line.push(if here {
+                '+'
+            } else if c.door != 0 {
+                'D'
+            } else if c.height == 0 {
+                '.'
+            } else if c.win == asciicity::interior::fit::WINDOW {
+                '='
+            } else if c.win == asciicity::interior::fit::LIFT {
+                'L'
+            } else if c.win == asciicity::interior::fit::WALL {
+                '#'
+            } else {
+                'o'
+            });
+        }
+        eprintln!("{line}");
     }
 }
 
@@ -1574,7 +1956,13 @@ fn bench(a: &Args) {
     // having. Walk in through a real door with the real keys — there is no
     // back way into a room, and a bench that got there by one would not be
     // measuring the engine anybody plays.
-    if a.indoors {
+    // And a MOVING LIFT is a third frame with a third cost: a shaft wall, a
+    // well with no floor and no ceiling over it, and the city through the glass
+    // from forty units up. It is worth its own number and it is not the indoor
+    // one.
+    if a.in_lift {
+        bench_into_lift(&mut eng, a.seed);
+    } else if a.indoors {
         let Some((dx, dz, face)) = eng.world.door_near(eng.cam.x, eng.cam.z, 160) else {
             eprintln!("no entrance within 160 cells of the spawn for seed {}", a.seed);
             std::process::exit(1);
@@ -1606,6 +1994,7 @@ fn bench(a: &Args) {
     let mut paint = Vec::with_capacity(n);
     let mut hits = 0usize;
     let mut inside = 0usize;
+    let mut moving = 0usize;
     // Warm up: let the population settle and the camera get out of the spawn.
     for _ in 0..60 {
         eng.step(1.0 / 60.0, key::FWD, 0.0, 0.0);
@@ -1613,8 +2002,16 @@ fn bench(a: &Args) {
     }
     let wall = Instant::now();
     for i in 0..n {
-        // Keep it moving and turning, so no frame gets a free ride.
-        let keys = key::FWD | if (i / 40) % 2 == 0 { key::TURN_R } else { key::SPRINT };
+        // Keep it moving and turning, so no frame gets a free ride. In a lift
+        // you do not walk: the car is what moves, so the keys are the panel and
+        // the head, and the panel is pressed again whenever the car stops so
+        // that every frame measured is a frame of a moving lift.
+        let keys = if a.in_lift {
+            let idle = eng.lift().map(|l| !l.moving()).unwrap_or(true);
+            (if idle { key::ACT } else { 0 }) | if (i / 40) % 2 == 0 { key::TURN_R } else { 0 }
+        } else {
+            key::FWD | if (i / 40) % 2 == 0 { key::TURN_R } else { key::SPRINT }
+        };
         eng.step(1.0 / 60.0, keys, 0.0, 0.0);
         eng.render();
         let t = Instant::now();
@@ -1626,6 +2023,9 @@ fn bench(a: &Args) {
         hits += eng.hit_count();
         if eng.world.indoors() {
             inside += 1;
+        }
+        if eng.lift().is_some_and(|l| l.moving()) {
+            moving += 1;
         }
     }
     let wall_ms = wall.elapsed().as_secs_f32() * 1000.0;
@@ -1649,6 +2049,13 @@ fn bench(a: &Args) {
         hits as f32 / n as f32
     );
     println!("  wall clock over the run: {:.1} ms for {n} frames", wall_ms);
+    if a.in_lift {
+        println!(
+            "  {} of {n} frames were in a MOVING lift; the car ended at {:.1} units",
+            moving,
+            eng.lift().map(|l| l.y).unwrap_or(0.0)
+        );
+    }
     if a.indoors || inside > 0 {
         println!(
             "  {inside} of {n} frames were INDOORS ({}%){}",

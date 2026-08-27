@@ -401,6 +401,10 @@ impl Keyboard {
         if self.down(b' ' as u32) || self.down(K_SHIFT) { k |= key::SPRINT; }
         if self.down(b'e' as u32) || self.down(K_PGUP) { k |= key::RISE; }
         if self.down(b'c' as u32) || self.down(K_PGDN) { k |= key::SINK; }
+        // Act on whatever is in reach. Edge-triggered inside the ENGINE, not
+        // here, so every frontend — keyboard, film script, test — presses a
+        // panel exactly once for one press.
+        if self.down(b'x' as u32) || self.down(13) { k |= key::ACT; }
         k
     }
 

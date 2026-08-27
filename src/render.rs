@@ -752,6 +752,11 @@ impl Renderer {
         for y in 0..proj.rows {
             self.ceil_d[y] = proj.plane_depth(y, cy);
         }
+        // A car's ceiling stops at its own glass; over the WELL there is open
+        // shaft, and what closes it off is the soffit at the top of the shaft,
+        // tens of units up. Without this second plane the sky pass shows
+        // through the roof of the building on the top floor.
+        let head = if room.lift.is_some() { room.shaft_head() } else { f32::NAN };
         let (fx, fz) = cam.forward();
         let (rx, rz) = cam.right();
         let inv_fall = 1.0 / room.fall;
@@ -768,6 +773,32 @@ impl Renderer {
                 let wz = cam.z + dz * d;
                 let (cx, cz) = (wx.floor() as i32, wz.floor() as i32);
                 let Some(c) = room.at(cx, cz) else { continue };
+                if c.win == fit::WELL {
+                    // Open shaft. The soffit that closes it is `head` up, at a
+                    // different distance, so it takes its own sample — and only
+                    // counts where THAT sample is over the well too.
+                    if head.is_nan() {
+                        continue;
+                    }
+                    let hd = proj.plane_depth(y, head);
+                    if !(hd > 0.0) || hd > ROOM_MAX {
+                        continue;
+                    }
+                    let (hx, hz) = (cam.x + dx * hd, cam.z + dz * hd);
+                    let (kx, kz) = (hx.floor() as i32, hz.floor() as i32);
+                    if !room.at(kx, kz).is_some_and(|k| k.win == fit::WELL) {
+                        continue;
+                    }
+                    let n = noise(13 * kx + 5, 17 * kz + 3);
+                    g.put(
+                        x as i32,
+                        y as i32,
+                        if n > 0.7 { b'#' } else { b'=' },
+                        hsl(CEIL_HUE, 8.0, 5.0 + 7.0 * n),
+                        hd,
+                    );
+                    continue;
+                }
                 // A wall or a column reaches the ceiling, so the wall pass owns
                 // that column of screen and this would only fight it.
                 if c.height as f32 >= cy - 0.01 {
@@ -839,7 +870,27 @@ impl Renderer {
                     let (cx, cz) = (wx.floor() as i32, wz.floor() as i32);
                     if let Some(c) = room.at(cx, cz) {
                         drawn = true;
-                        if c.height == 0 {
+                        if c.win == fit::WELL {
+                            // The car's slab stops at its own glass. Down the
+                            // shaft is the pit, on the ground plane — the same
+                            // one the street stands on, because the shaft is
+                            // cut all the way down to it.
+                            let pd = proj.ground_depth[y as usize];
+                            if pd > 0.0 && pd.is_finite() {
+                                let (px, pz) = (cam.x + dx * pd, cam.z + dz * pd);
+                                let (kx, kz) = (px.floor() as i32, pz.floor() as i32);
+                                if room.at(kx, kz).is_some_and(|k| k.win == fit::WELL) {
+                                    let n = noise(7 * kx + 11, 5 * kz + 19);
+                                    g.put(
+                                        x as i32,
+                                        y,
+                                        if n > 0.62 { b'#' } else { b'=' },
+                                        hsl(206.0, 10.0, 3.0 + 8.0 * n),
+                                        pd,
+                                    );
+                                }
+                            }
+                        } else if c.height == 0 {
                             let b = room_light(room.ambient, d, inv_fall);
                             let across = if room.light_along_x { cz } else { cx };
                             // Under a strip. The pool is what makes the light
@@ -967,20 +1018,35 @@ impl Renderer {
                 };
 
                 // --- a surface of the room --------------------------------
-                let solid = c.win == fit::WALL || c.win == fit::COLUMN;
-                // A wall and a column meet the ceiling exactly. Their cell
-                // height is that rounded up, and using it would leave a seam.
-                let top = if solid { cy } else { c.height as f32 };
-                if top <= room.base + 0.01 {
+                let solid = c.win == fit::WALL || c.win == fit::COLUMN || c.win == fit::LIFT;
+                // A wall, a column and the lift core meet the ceiling exactly.
+                // Their cell height is that rounded up, and using it would
+                // leave a seam. A window's sill is read off the ROOM, not off
+                // the cell: a cell height is a whole unit and a car's slab is
+                // not, so quantising it would make the glass jump a unit at a
+                // time as the car rose.
+                let top = if solid {
+                    cy
+                } else if c.win == fit::WINDOW {
+                    room.base + room.sill
+                } else {
+                    c.height as f32
+                };
+                if top <= room.base + 0.01 && c.win != fit::SHAFT {
                     continue;
                 }
+                // The walls of the shaft run the whole height of the building,
+                // and you are looking DOWN one of them as well as up it — so
+                // they are the one surface indoors that is not floored by the
+                // slab you are standing on.
+                let foot = if c.win == fit::SHAFT { 0.0 } else { room.base };
                 // The top face of anything you are looking down on: a counter,
                 // a window sill, a crate. Same band the rooftops use.
                 if proj.eye > top {
                     ybuf = ybuf.min(self.fitting_top(g, room, proj, hit, &c, top, x as i32, ybuf));
                 }
                 let r0 = proj.row_of(top, hit.dist).ceil().max(0.0) as i32;
-                let r1raw = proj.row_of(room.base, hit.dist);
+                let r1raw = proj.row_of(foot, hit.dist);
                 if r1raw < 0.0 {
                     continue;
                 }
@@ -1131,11 +1197,12 @@ impl Renderer {
             // the cap rather than dropped, so nothing pops.
             let wide = |r: f32| ((r * cols_per_unit).round() as i32).clamp(0, cols / 9);
             match p.kind {
-                Fitting::ExitSign => {
-                    // The one thing in the room allowed to shout, and it earns
-                    // it: from the back of a room the way out is a lit word.
+                Fitting::ExitSign | Fitting::LiftSign => {
+                    // The two things in a room allowed to shout, and they earn
+                    // it: from the back of a room the way out — and the way up
+                    // — is a lit word.
                     let half = wide(0.85).max(2);
-                    let word = b"EXIT";
+                    let word = p.kind.word();
                     let bg = hsl(p.hue, 88.0, 22.0 + 14.0 * b);
                     let ink = hsl(p.hue, 100.0, 62.0 + 24.0 * b);
                     let mid = (top + bot) / 2;
@@ -1229,6 +1296,34 @@ impl Renderer {
                             }
                             let ch = if n > 0.72 { b'*' } else if n > 0.45 { b'&' } else { b'%' };
                             g.put(cx, y, ch, hsl(p.hue, 48.0, 14.0 + 34.0 * b), fd);
+                        }
+                    }
+                }
+                Fitting::CallUp | Fitting::CallDown => {
+                    // A call button, at hand height on the wall beside you: a
+                    // lit arrow on a small plate. Which of the two is under
+                    // your hand is what the act key does, and the HUD says
+                    // which before you press. Kept SMALL on purpose — the first
+                    // cut used the terminal's radius and a lift panel two paces
+                    // off then filled a fifth of the screen with a dark slab.
+                    let half = wide(0.11).max(1);
+                    let up = p.kind == Fitting::CallUp;
+                    let mid = (top + bot) / 2;
+                    for y in top..=bot {
+                        for cx in x0 - half..=x0 + half {
+                            if self.hidden(cx, fd) {
+                                continue;
+                            }
+                            let edge = y == top || y == bot || cx == x0 - half || cx == x0 + half;
+                            let arrow = (y - mid).abs() <= (bot - top) / 6 && (cx - x0).abs() <= half / 3;
+                            let (ch, l, sat) = if arrow {
+                                (if up { b'^' } else { b'v' }, 62.0, 100.0)
+                            } else if edge {
+                                (b'+', 40.0, 34.0)
+                            } else {
+                                (b':', 26.0, 22.0)
+                            };
+                            g.put(cx, y, ch, hsl(p.hue, sat, l * (0.55 + 0.45 * b)), fd);
                         }
                     }
                 }
@@ -2095,6 +2190,28 @@ fn surface_of(
                 (b':', hsl(hue, sat * 0.7, 16.0 + 32.0 * b))
             }
         }
+        // **The wall at the back of the lift shaft.** The only surface in this
+        // engine textured from the world model's own account of the building
+        // rather than from the cell it is on — see `shaft_glyph`.
+        fit::SHAFT => shaft_glyph(room, c, along, cw, wy + room.base, sn, b),
+        // The lift core, from the room. A machine standing in the lobby: a
+        // metal box with two doors in its flank and a lit indicator over them.
+        fit::LIFT => {
+            if dt == 0 {
+                (b'=', hsl(room.light_hue, room.light_sat, 40.0 + 50.0 * b))
+            } else if dr == 0 {
+                (b'_', hsl(hue, sat * 0.6, 6.0 + 40.0 * b))
+            } else if (2.28..2.52).contains(&wy) {
+                // The head of the doors, run right round the core.
+                (b'=', hsl(44.0, 62.0, 34.0 + 44.0 * b))
+            } else if line_at(0.75) {
+                (b'|', hsl(hue, sat + 8.0, 22.0 + 54.0 * b))
+            } else if sn > 0.72 {
+                (b'8', hsl(hue, sat, 20.0 + 48.0 * b))
+            } else {
+                (b'#', hsl(hue, sat * 0.7, 14.0 + 44.0 * b))
+            }
+        }
         fit::COLUMN => {
             if dt == 0 {
                 (b'=', hsl(hue, sat, 44.0 + 42.0 * b))
@@ -2196,6 +2313,140 @@ fn surface_of(
             }
         }
         _ => (b':', hsl(hue, sat, 18.0 + 32.0 * b)),
+    }
+}
+
+/// **The wall at the back of the lift shaft — the floors going past.**
+///
+/// This is the one surface in the engine whose texture comes out of the world
+/// model rather than out of the cell it is drawn on. `Interior::storeys` is the
+/// building's own table of floors — the same table every room in the building
+/// is built from and the only heights the car is allowed to stop at — and every
+/// band here is one fact off it, at its real world height:
+///
+///   * the **slab** under a floor, `lift::SLAB` deep, with its nosing lit,
+///     because the thing you actually watch go past is a floor plate;
+///   * above it, on the wall square to the car, **that storey**: lit in its own
+///     colours, brightest under its own ceiling, so floor 3 and floor 4 do not
+///     look alike and the number on the wall is not the only thing telling them
+///     apart;
+///   * on the side walls, no storeys at all — a shaft wall and its guide rails.
+///     The dark sides against the lit back is most of what frames the picture.
+///
+/// It is keyed on ABSOLUTE world height, never on height above the car, which
+/// is what makes the floors hold still in the world and slide down past the
+/// glass as the car rises. Keying it on the car would paper the shaft with a
+/// pattern that travelled with you, which is the one thing this must not be.
+#[allow(clippy::too_many_arguments)]
+fn shaft_glyph(
+    room: &Interior,
+    c: &crate::world::Cell,
+    along: f32,
+    cw: f32,
+    ay: f32,
+    sn: f32,
+    b: f32,
+) -> (u8, [u8; 3]) {
+    let rib = |w: f32| w > cw * 1.7 && (along / w).floor() != ((along - cw) / w).floor();
+    let Some((s, rel)) = room.storey_at(ay) else {
+        // Below the lowest slab: the pit, and raw structure.
+        return (if rib(1.2) { b'|' } else { b'.' }, hsl(206.0, 8.0, 3.0 + 7.0 * sn));
+    };
+    if rel < 0.0 {
+        // **The floor plate.** The heaviest band in the shaft and the one the
+        // eye tracks, so it gets the strongest contrast in here: a lit nosing
+        // on top of a slab of dark concrete.
+        return if rel > -0.16 {
+            (b'=', hsl(40.0, 34.0, 52.0 + 24.0 * b))
+        } else if rel > -0.34 {
+            (b'#', hsl(30.0, 12.0, 24.0 + 14.0 * b))
+        } else if rel < -crate::lift::SLAB + 0.16 {
+            (b'=', hsl(206.0, 8.0, 15.0 + 12.0 * b))
+        } else {
+            (if sn > 0.5 { b'H' } else { b'#' }, hsl(206.0, 7.0, 10.0 + 13.0 * b))
+        };
+    }
+    if rel >= s.ceiling {
+        // The plenum between one storey's ceiling and the next one's slab.
+        return (b'-', hsl(206.0, 6.0, 4.0 + 7.0 * b));
+    }
+    if c.arch == 0 {
+        // A side wall of the shaft: concrete, and the car's guide rails on it.
+        return if rib(1.3) {
+            (b'|', hsl(206.0, 12.0, 20.0 + 20.0 * b))
+        } else if sn > 0.66 {
+            (b':', hsl(206.0, 8.0, 10.0 + 13.0 * b))
+        } else {
+            (b'.', hsl(206.0, 6.0, 6.0 + 11.0 * b))
+        };
+    }
+
+    // --- the storey itself, square to the car ----------------------------
+    // Light comes from its ceiling, the way it does in the room you step out
+    // into, because it is the same room and the same `ambient`.
+    let up = rel / s.ceiling;
+    let lit = (s.ambient * (0.42 + 0.58 * up)).clamp(0.0, 1.0) * b;
+
+    // The storey's number, stencilled on the pier at one side of it. Fixed
+    // brightness: it is lit signage in a shaft, and it is the one thing in here
+    // that has to read at whatever distance the shaft happens to put it.
+    if (0.62..2.08).contains(&rel) {
+        let org = if room.ix != 0 { room.z0 } else { room.x0 } as f32;
+        // Centred across the wall, whatever the shaft is wide.
+        let u = along - org - (crate::lift::CORE_W as f32 * 0.5 - 1.85);
+        if (1.02..2.68).contains(&u) {
+            // A framed plate, the way a billboard on a facade is framed: a
+            // stencil straight on to a lit wall is a stencil you cannot read.
+            if !(0.75..1.95).contains(&rel) || !(1.15..2.55).contains(&u) {
+                return (b'+', hsl(44.0, 30.0, 16.0 + 14.0 * b));
+            }
+            let gx = (((u - 1.15) / 1.4) * 7.0) as i32;
+            let gy = ((((1.95 - rel) / 1.2) * 5.0) as i32).clamp(0, 4) as usize;
+            let n = s.floor.clamp(0, 99);
+            // A seven-wide field either way, so a floor number is the same size
+            // whether it is one digit or two.
+            let (glyph, col) = if n >= 10 {
+                if gx < 3 {
+                    (b'0' + (n / 10) as u8, gx)
+                } else if gx == 3 {
+                    (b' ', 0)
+                } else {
+                    (b'0' + (n % 10) as u8, gx - 4)
+                }
+            } else if (2..5).contains(&gx) {
+                (b'0' + n as u8, gx - 2)
+            } else {
+                (b' ', 0)
+            };
+            if glyph != b' '
+                && crate::palette::glyph3x5(glyph)[gy].as_bytes()[col.clamp(0, 2) as usize] == b'#'
+            {
+                return (b'#', hsl(44.0, 96.0, 66.0));
+            }
+            return (b'.', hsl(44.0, 22.0, 7.0 + 8.0 * b));
+        }
+    }
+
+    // A lit floor across the well. Strong, simple horizontals — the cove it is
+    // lit from, a dado, the plate you would walk out on to — with the glazing's
+    // mullions across them. A noise field at this range reads as speckle and
+    // not as a room, which is the same lesson `ROOM_RAMP` learned indoors.
+    if rel < 0.26 {
+        (b'_', hsl(s.light_hue, s.light_sat * 0.7, 30.0 + 30.0 * lit))
+    } else if rel > s.ceiling - 0.26 {
+        // Its ceiling cove — where the light in there comes from.
+        (b'=', hsl(s.light_hue, s.light_sat + 26.0, 54.0 + 38.0 * lit))
+    } else if rel > s.ceiling - 0.58 {
+        (b'-', hsl(s.light_hue, s.light_sat + 10.0, 38.0 + 34.0 * lit))
+    } else if (0.92..1.16).contains(&rel) {
+        (b'-', hsl(s.wall_hue, s.wall_sat + 18.0, 32.0 + 34.0 * lit))
+    } else if rib(1.0) {
+        // The mullions of the storey's own glazing, one to a world unit.
+        (b'|', hsl(s.wall_hue, s.wall_sat + 24.0, 34.0 + 36.0 * lit))
+    } else if sn > 0.5 {
+        (b':', hsl(s.wall_hue, s.wall_sat + 22.0, 24.0 + 42.0 * lit))
+    } else {
+        (b'+', hsl(s.wall_hue, s.wall_sat + 14.0, 19.0 + 38.0 * lit))
     }
 }
 

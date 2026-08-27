@@ -33,7 +33,8 @@ ceiling / floor / room walls / fixtures in here.
 
 Rooms are addressable by floor: `Interior` carries a floor number and a slab
 height and assumes nothing about either, so the vertical dimension is not
-hardcoded to one storey.
+hardcoded to one storey. [The lift](lift.md) is what came of that — the same
+room generator, told which storey it is building.
 
 ## What it did to the street
 

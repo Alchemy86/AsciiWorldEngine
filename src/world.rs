@@ -13,7 +13,8 @@
 //! `Cell`, in the same units the renderer wants them: hue in DEGREES,
 //! saturation and lit as PERCENTAGES.
 
-use crate::interior::{door_slot, Interior};
+use crate::interior::{door_slot, Interior, Site};
+use crate::lift::Storey;
 use crate::rng::{hash3, hash3f};
 
 pub const BLOCK: i32 = 32;
@@ -200,6 +201,30 @@ impl World {
             Place::Outdoors => MAX_HEIGHT as f32,
             Place::Indoors(r) => (r.tallest as f32).max(MAX_HEIGHT as f32),
         }
+    }
+
+    /// **The floors a building serves.** Empty for a building with no lift,
+    /// which is most of them.
+    ///
+    /// The height that decides it is the building's own height at its entrance
+    /// — the wall behind the doorway, `door = face + 5`, which is the part of
+    /// the plot the shaft is cut down. Asking `city_cell` rather than `cell`
+    /// on purpose: this is a question about the CITY, and it is asked while the
+    /// engine may already be indoors.
+    pub fn storeys(&self, site: Site) -> Vec<Storey> {
+        let f = crate::interior::fabric(site, 0);
+        if f.core.is_none() {
+            return Vec::new();
+        }
+        // The height that decides it is the building's own height at its
+        // entrance — the wall behind the doorway, `door = face + 5`, which is
+        // the part of the plot the shaft is cut down and the part the core
+        // stands hard against. Asking `city_cell` rather than `cell` on
+        // purpose: this is a question about the CITY, and it is asked while the
+        // engine may already be indoors.
+        let (ix, iz) = crate::interior::INWARD[(site.face as usize).min(3)];
+        let h = self.city_cell(site.dx + ix, site.dz + iz).height;
+        crate::interior::plan_storeys(site, h)
     }
 
     /// Everything about one cell of wherever we are. One well-predicted branch

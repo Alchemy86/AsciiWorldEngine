@@ -203,9 +203,20 @@ pub fn building_of(gx: i32, gz: i32, plan_id: u16, block: i32, grain: i32) -> Bu
 
 // --- billboards ----------------------------------------------------------
 /// A 3x5 stroke font. Tall buildings carry one lit word (or one big letter) on
-/// a framed panel partway up the facade.
-fn glyph3x5(c: u8) -> [&'static str; 5] {
+/// a framed panel partway up the facade, and the wall at the back of a lift
+/// shaft carries the number of each floor it goes past.
+pub fn glyph3x5(c: u8) -> [&'static str; 5] {
     match c {
+        b'0' => ["###", "#.#", "#.#", "#.#", "###"],
+        b'1' => ["..#", "..#", "..#", "..#", "..#"],
+        b'2' => ["###", "..#", "###", "#..", "###"],
+        b'3' => ["###", "..#", "###", "..#", "###"],
+        b'4' => ["#.#", "#.#", "###", "..#", "..#"],
+        b'5' => ["###", "#..", "###", "..#", "###"],
+        b'6' => ["###", "#..", "###", "#.#", "###"],
+        b'7' => ["###", "..#", "..#", "..#", "..#"],
+        b'8' => ["###", "#.#", "###", "#.#", "###"],
+        b'9' => ["###", "#.#", "###", "..#", "###"],
         b'A' => [".#.", "#.#", "###", "#.#", "#.#"],
         b'B' => ["##.", "#.#", "##.", "#.#", "##."],
         b'C' => [".##", "#..", "#..", "#..", ".##"],

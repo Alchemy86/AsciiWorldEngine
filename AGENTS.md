@@ -76,6 +76,35 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   | with them, on the STREET | 0.009 | 0.080 | 0.379 | 0.133 | 0.596 |
   | with them, INDOORS | 0.001 | 0.029 | 0.403 | 0.070 | 0.504 |
 
+  The lift, 10 interleaved runs of 400 frames each, same machine and session,
+  180x60:
+
+  | | sim | cast | render | paint | total |
+  |---|---|---|---|---|---|
+  | before the lift, on the STREET | 0.009 | 0.082 | 0.364 | 0.131 | 0.587 |
+  | with it, on the STREET | 0.009 | 0.083 | 0.367 | 0.137 | 0.596 |
+  | before the lift, INDOORS | 0.001 | 0.030 | 0.397 | 0.093 | 0.522 |
+  | with it, INDOORS | 0.001 | 0.031 | 0.399 | 0.097 | 0.527 |
+  | with it, in a MOVING LIFT | 0.001 | 0.082 | 0.420 | 0.108 | 0.611 |
+
+  Street **+0.009**, indoors **+0.005**, a moving lift **+0.016 over the
+  street**. Verify with `--bench`, `--bench --indoors` and
+  `--bench --lift-bench`.
+
+- **A delta this small needs a null control, so run one.** The same build in
+  BOTH slots of the same alternating pattern, ten pairs, comes out +0.0004
+  ms/frame with a per-pair range of +-0.006 — so the harness has no slot bias
+  and the lift's +0.009 on the street is real measurement. It is not real
+  WORK: three fifths of it is in `paint`, a stage the lift does not touch,
+  encoding byte-identical output. `Cell` is still 12 bytes and `Hit` 24; only
+  `Camera` grew (56 -> 60, for `ground`). What moved is where the linker put
+  things. The same feature measured **+0.001** against an earlier base, which
+  is the whole argument for interleaved pairs and against quoting a figure.
+  When the machine is loaded — another crew's `rustc` at 800% CPU — the same
+  measurement returned a street delta of **-0.09**, which would mean this
+  build made an untouched code path 15% faster. Check `/proc/loadavg` before
+  believing a bench, and re-run it settled.
+
   Paired over ten back-to-back runs the street delta is **+0.019 ms/frame
   (+3.4%)**, against a run-to-run spread of 0.007 ms on the same build.
   **Indoors is CHEAPER than the street** — 0.504 against 0.596 — and that is
@@ -194,14 +223,90 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   real keys, prints the floor plan as ASCII and shoots five frames.
   `--bench --indoors` benches from inside and says what fraction of frames
   actually were.
-- **What is deliberately NOT built, and what was made cheap for it.** There is
-  no lift and no second floor. But `Interior` carries a `floor` number and a
-  `base` slab height and nothing below that line assumes either is zero:
-  `Cell::height` is absolute world height, the floor slab is drawn opaque so the
-  wall continuing below your feet never shows, `World::max_height` is a method
-  rather than `MAX_HEIGHT` inlined at the raycaster, and the glazing is a
-  property of a CELL rather than of "the street wall", so a car with four glazed
-  sides works the same way. `Interior::build` already takes the storey.
+- **The floor-number groundwork paid off exactly as written.** `Interior`
+  carried a `floor` and a `base` slab height and nothing below that line assumed
+  either was zero — `Cell::height` is absolute world height, the floor slab is
+  drawn opaque, `World::max_height` is a method rather than `MAX_HEIGHT` inlined
+  at the raycaster, and the glazing is a property of a CELL rather than of "the
+  street wall". The lift is built on all four and changed none of them. See
+  "The lift" below.
+
+## The lift
+
+- **A car is a room that moves, and that is why nothing else had to change.**
+  `Place` is still `Outdoors | Indoors(Interior)`; the car IS an `Interior` with
+  a `Lift` on it for the one thing a room does not have, a `base` that changes.
+  The raycaster, the collision, the depth buffer and the renderer's pass list
+  never learned lifts exist. If you find yourself adding a third arm to
+  `Place` for this, look again at what is actually different.
+- **The two glazed sides show two different things for the same reason a window
+  does.** Outward, the car's grid stops and `World::cell` falls through to the
+  CITY — and rising forty units up a shaft is the camera move the elevated vista
+  already makes, so the street falls away underneath you correctly and for free.
+  Inward is a well of open cells the DDA walks straight through to a wall at the
+  back of the core.
+- **The depth AND the width of the shaft are rendering requirements before they
+  are architectural ones**, and both are written down in `lift.rs` because they
+  do not look like requirements. The vertical field of view is ~40 degrees and
+  the horizontal ~57: a surface an arm's length away shows about one world unit
+  of its own height however tall it is, so a shaft wall right behind the glass
+  is a stripe, not a floor. `CORE_D = 9` sets it back far enough for the cone to
+  cover a storey and a bit; `CORE_W = 7` makes the well five units across so it
+  fills two thirds of the frame instead of being a slot in a screen of dark side
+  wall. Both were arrived at by shooting `--lift` and looking.
+- **`render::shaft_glyph` is the only surface in the engine textured from the
+  world model rather than from the cell it is on.** `Interior::storeys` is the
+  building's own floor table — the same one each room is built from and the only
+  heights the car may stop at — and it is keyed on ABSOLUTE world height. Key it
+  on height above the car instead and you paper the shaft with a pattern that
+  travels with you, which is the one thing the feature must not be.
+- **The footprint half of the room generator does not take the storey number and
+  the character half does.** `interior::fabric` splits them: `across`, `deep`,
+  the entrance offset and the core come off a floor-blind key, so a shaft lands
+  on the same cells floor after floor; the family, and with it the colours, the
+  ceiling and everything in the room, come off a per-floor key. Floor zero's
+  per-floor key IS the floor-blind key, which is what makes every ground-floor
+  room in the city bit-identical to the build before lifts existed —
+  `--vista` and `--capture` come out byte-for-byte the same, and `--doorway`
+  differs on exactly the frames where a lobby now has a core in it.
+- **Two reasons a tall building may still have no lift**, and both are the
+  generator's: the height at its own entrance (`World::storeys`), and whether
+  its frontage can hold the core clear of its own doorway
+  (`interior::fabric`). About half of entrances get one, serving 4..10 floors.
+- **The core stands hard by the entrance, and that is not only for wayfinding.**
+  A room's frontage runs 14..25 cells on a block whose plots are often half
+  that, and rooms have always overhung their plots — invisibly, because a wall
+  out over the avenue looks like a wall. A lift core does not: at the far end of
+  a wide frontage it would routinely be standing over the roadway with its doors
+  opening on to mid-air. Beside the doorway it is as far inside the plot as the
+  doorway is. Do not "tidy" it back to the middle of the wall.
+- **`Camera::airborne` is measured from `Camera::ground`, not from zero**, and
+  that is load-bearing rather than tidy. It gates collision; comparing the eye
+  against street level meant a camera anywhere above the ground floor was
+  "flying", so you walked through the walls of every room a lift can reach and
+  out through the side of a rising car. It was the lift that found it, but the
+  bug was already there for any storey above the first.
+- **`Cell::door` grew a third meaning and no new field.** `1..=4` a street
+  threshold, `5..=8` the wall behind one, `9..=12` a lift landing; the low two
+  bits index `interior::INWARD` in all three, so `Engine::portal` reads which
+  way is IN the same way every time. `Cell::arch` is reinterpreted indoors too —
+  it marks the wall at the back of the shaft, the only one that carries storey
+  numbers.
+- **Interaction is ONE bit** (`camera::key::ACT`, bound to `X` and `Enter`),
+  edge-triggered inside the engine so a frontend, a film script and a test all
+  press a panel once for one press. What it MEANS is the world model's:
+  `Interior::interaction_near` returns the nearest fixture within reach and
+  `Engine::act` acts on it. The lift panel is two fixtures, one at each end of
+  the car, so which button is under your hand is which one you are standing at —
+  no second key, no menu, and the HUD says which before you press.
+- **`--lift` is the evidence tool**, next to `--doorway` and `--plate-shot` and
+  for the same reason: `--vista` and `--capture` pick their frame on the shape
+  of the CITY. It finds the tallest lift building near the spawn, walks in with
+  the real keys, walks into the car with the real keys and presses the panel
+  with the real act bit. `--bench --lift-bench` benches a MOVING car and drives
+  the panel rather than walking, because you do not walk in a lift.
+- **Where the frames come from, and what they cost.** `docs/lift.png` is
+  `--lift` at 180x60 through the committed recipe below. Numbers in "Measuring".
 
 ## Registration plates, and the grid's background plane
 
@@ -347,8 +452,14 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   --screenshot=out.png file://.../frame.svg`, then ImageMagick `magick` (not
   `convert`, deprecated in IMv7) to crop, label and `-append` the comparison.
   `docs/plates.png`, `docs/plate-look.png`, `docs/plate-size.png`,
-  `docs/variety.png`, `docs/silhouettes.png`, `docs/interiors.png` and
-  `docs/doorway-street.png` were all built that way.
+  `docs/variety.png`, `docs/silhouettes.png`, `docs/interiors.png`,
+  `docs/doorway-street.png` and `docs/lift.png` were all built that way.
+  `docs/lift.png` has a committed recipe: `--lift --out DIR`, then each of the
+  six `.svg` through headless Chrome at `1980,1090`, then
+  `magick FRAME -resize 900x -bordercolor black -border 6 -background black
+  -fill '#8fd3c8' -pointsize 22 -font "$(fc-match -f '%{file}' 'DejaVu Sans')"
+  -gravity northwest label:"CAPTION" -gravity center -append` for each, then
+  `+append` in pairs and `-append` the three rows.
 - **Give headless Chrome the frame's real height.** An SVG frame is
   `cols * 11` by `rows * 18` px; `--window-size=1980,700` on a 60-row frame
   silently CROPS the bottom third and the picture looks wrong in ways that

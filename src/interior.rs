@@ -43,6 +43,7 @@
 //! `door` means exactly one thing in both places: a threshold you can walk
 //! through, and which way is in. That is what makes the transition symmetric.
 
+use crate::lift::{self, Core, Lift, Storey};
 use crate::palette::building_of;
 use crate::rng::{hash3, Rng};
 use crate::world::{Cell, BLOCK};
@@ -66,6 +67,13 @@ pub const PORTAL_GAP: f32 = 0.34;
 /// and a full-height bay over a sill is a real thing this city is full of.
 pub const SILL: f32 = 1.0;
 
+/// The car's own colours. A lift is the same lift in every building — brushed
+/// steel and a warm light — so unlike a room these do not come off the
+/// building's hash. It is a machine, not a room in the family.
+const CAR_HUE: f32 = 206.0;
+const CAR_SAT: f32 = 12.0;
+const CAR_LIGHT_HUE: f32 = 44.0;
+
 /// What a solid cell IS, indoors. Carried in `Cell::win`.
 pub mod fit {
     pub const FLOOR: u8 = 0;
@@ -82,6 +90,16 @@ pub mod fit {
     pub const PLANTER: u8 = 10;
     pub const DESK: u8 = 11;
     pub const TANK: u8 = 12;
+    /// The lift core, seen from a room: a solid box with two doors in its
+    /// flank. Everything that happens inside it happens in a different mode.
+    pub const LIFT: u8 = 13;
+    /// A wall of the shaft, seen from inside it. **The one surface in this
+    /// engine drawn from the storey table** — see `render::shaft_face`.
+    pub const SHAFT: u8 = 14;
+    /// Open air in the shaft. Height zero like any open cell, so the DDA walks
+    /// straight through it; tagged so the car's floor slab and ceiling stop at
+    /// the glass instead of closing the shaft off above and below you.
+    pub const WELL: u8 = 15;
 }
 
 /// Floor and ceiling material. Carried in `Cell::surface`.
@@ -145,7 +163,7 @@ enum Plan {
 }
 
 /// Everything fixed about a family.
-struct Style {
+pub struct Style {
     room: Room,
     plan: Plan,
     /// Clear ceiling height range, world units above the floor slab.
@@ -379,6 +397,13 @@ pub enum Fitting {
     Lamp,
     Plant,
     Vent,
+    /// The two buttons of the lift panel. Which one is under your hand is
+    /// which one you are standing at — see `Interior::interaction_near`.
+    CallUp,
+    CallDown,
+    /// Over the landing doors, and lit like the exit sign for the same reason:
+    /// a lift you cannot find is a lift you do not have.
+    LiftSign,
 }
 
 impl Fitting {
@@ -390,6 +415,9 @@ impl Fitting {
             Fitting::Lamp => "STANDING LAMP",
             Fitting::Plant => "PLANTING",
             Fitting::Vent => "AIR HANDLER",
+            Fitting::CallUp => "LIFT PANEL",
+            Fitting::CallDown => "LIFT PANEL",
+            Fitting::LiftSign => "LIFT",
         }
     }
 
@@ -401,6 +429,9 @@ impl Fitting {
             Fitting::Lamp => "SWITCH",
             Fitting::Plant => "LOOK",
             Fitting::Vent => "LISTEN",
+            Fitting::CallUp => "GO UP",
+            Fitting::CallDown => "GO DOWN",
+            Fitting::LiftSign => "STEP IN",
         }
     }
 
@@ -413,6 +444,19 @@ impl Fitting {
             Fitting::Lamp => 1.6,
             Fitting::Plant => 1.6,
             Fitting::Vent => 2.4,
+            // The two buttons are at either end of the car, and this is set to
+            // cover the whole of it from either one: wherever you stand, one of
+            // them is the nearer, and the HUD says which before you press.
+            Fitting::CallUp | Fitting::CallDown => 3.4,
+            Fitting::LiftSign => 2.6,
+        }
+    }
+
+    /// The word a lit sign carries, for the two fittings that are signs.
+    pub fn word(self) -> &'static [u8] {
+        match self {
+            Fitting::LiftSign => b"LIFT",
+            _ => b"EXIT",
         }
     }
 }
@@ -443,8 +487,24 @@ pub struct Window {
     pub sill: f32,
 }
 
+/// **Which building's inside this is** — everything the generator needs to
+/// build any storey of it, and nothing about which storey. Carried by every
+/// `Interior` so a car can rebuild the room it opens on to without the engine
+/// having to remember where it came from.
+#[derive(Clone, Copy)]
+pub struct Site {
+    pub seed: i32,
+    /// The first cell of the street doorway, and which way it faces in.
+    pub dx: i32,
+    pub dz: i32,
+    pub face: u8,
+    pub plan: u16,
+    pub grain: i32,
+}
+
 pub struct Interior {
     pub room: Room,
+    pub site: Site,
     /// Which floor of the building this is. Zero is the one you walk into off
     /// the street. Nothing in here assumes it — `base` carries the height and
     /// the label carries the number.
@@ -474,6 +534,22 @@ pub struct Interior {
     /// The doorway cells.
     pub door_cells: [(i32, i32); 2],
     pub windows: Vec<Window>,
+    /// How high the glazing's sill stands off this floor's slab. A room's is
+    /// `SILL`; a car's is a kick rail. It is read back rather than taken off
+    /// the cell's own height because a car's slab is at a fraction of a unit
+    /// and a cell height is a whole one — quantising the sill would make it
+    /// jump a unit at a time as the car rose.
+    pub sill: f32,
+
+    /// **The building's floors, if it has a lift.** Empty otherwise, which is
+    /// most buildings. The same table builds the room on every storey, decides
+    /// where the car can stop, and is what the shaft wall is textured from.
+    pub storeys: Vec<Storey>,
+    /// Where the lift core stands in this building's plan. `Some` exactly when
+    /// `storeys` is non-empty.
+    pub core: Option<Core>,
+    /// Set on the CAR and on nothing else: this interior is the one that moves.
+    pub lift: Option<Lift>,
 
     pub floor_mat: u8,
     pub wall_hue: f32,
@@ -506,6 +582,184 @@ pub struct Interior {
     to_exit: Vec<u16>,
 }
 
+/// **The half of a building's inside that does not depend on which floor you
+/// are on.** How big its rooms are, where they sit in the world, where the
+/// entrance falls along the frontage, and where the lift core stands.
+///
+/// It exists because a shaft has to be a shaft: the core must land on the same
+/// world cells on every storey, or riding one floor would step you sideways
+/// into a wall. So the FOOTPRINT comes off a key with the storey number left
+/// out, and only the *character* — the family, and with it the colours, the
+/// ceiling height and everything in the room — comes off a key with it in.
+///
+/// Floor zero's per-floor key IS the floor-blind key (`floor_no * 9973 == 0`),
+/// so every ground-floor room in the city is exactly the room it was before
+/// there were lifts, cell for cell.
+pub struct Fabric {
+    pub st: &'static Style,
+    /// The generator's stream, left exactly where `build` used to have it: the
+    /// draws after this point are the glazing and the furniture.
+    pub r: Rng,
+    pub key: u32,
+    pub across: i32,
+    pub deep: i32,
+    pub off: i32,
+    pub ceiling: f32,
+    pub ix: i32,
+    pub iz: i32,
+    pub x0: i32,
+    pub z0: i32,
+    pub wx: i32,
+    pub wz: i32,
+    /// Where a lift core would stand. Whether there IS one is a question about
+    /// the building's height, and `plan_storeys` is what answers it.
+    pub core: Option<Core>,
+}
+
+pub fn fabric(site: Site, floor_no: i32) -> Fabric {
+    let (ix, iz) = INWARD[(site.face as usize).min(3)];
+    let bx = site.dx.div_euclid(BLOCK);
+    let bz = site.dz.div_euclid(BLOCK);
+    let fabric_key = hash3(
+        bx.wrapping_mul(6301) + site.plan as i32,
+        bz.wrapping_mul(4507),
+        site.seed ^ 0x1F7,
+    );
+    let key = hash3(
+        bx.wrapping_mul(6301) + site.plan as i32,
+        bz.wrapping_mul(4507) + floor_no.wrapping_mul(9973),
+        site.seed ^ 0x1F7,
+    );
+    let mut r = Rng::new(fabric_key as u64 | ((site.plan as u64) << 32));
+
+    let st = &STYLES[(key % 10) as usize];
+    // Across the street frontage, and back from it. A room is never square by
+    // accident: the two come off different draws. Depth is kept near the depth
+    // of a real block, so the back wall is roughly where the back of the
+    // building is.
+    let across = 14 + r.below(12) as i32;
+    let deep = 15 + r.below(9) as i32;
+    let raw_ceiling = st.ceil.0 + (st.ceil.1 - st.ceil.0) * r.f32();
+    // The ground floor keeps whatever its family gives it — a lobby is double
+    // height and should be. A stack of double-height storeys is not a building,
+    // so everything above it is capped to an ordinary floor-to-ceiling.
+    let ceiling = if floor_no == 0 { raw_ceiling } else { raw_ceiling.min(lift::UPPER_CLEAR) };
+    // The doorway is two cells wide; put it a little off the middle of the near
+    // wall, so you do not walk into every room down its own axis.
+    let off = 2 + r.below((across as u32).saturating_sub(6).max(1)) as i32;
+
+    let (x0, z0, wx, wz);
+    if ix != 0 {
+        // Depth along X, across along Z.
+        wx = deep;
+        wz = across;
+        x0 = if ix > 0 { site.dx } else { site.dx - deep + 1 };
+        z0 = site.dz - off;
+    } else {
+        wx = across;
+        wz = deep;
+        x0 = site.dx - off;
+        z0 = if iz > 0 { site.dz } else { site.dz - deep + 1 };
+    }
+
+    // **The core stands beside the entrance**, three cells clear of the doorway
+    // on whichever side has room for it. Two reasons, and the second is the one
+    // that matters: a lift by the door is where a lift is, so walking in off
+    // the street puts the landing in front of you; and a room's frontage runs
+    // 14 to 25 cells on a block whose plots are often half that, so a core at
+    // the FAR end of one would routinely be standing over the avenue rather
+    // than in the building. Hard by the doorway it is as far inside the plot as
+    // the doorway is.
+    //
+    // A frontage with room on neither side simply gets no lift — one of the two
+    // reasons a building may be tall and still have none, the other being that
+    // it is not tall enough (`World::storeys`).
+    //
+    // `+a` is `+Z` when the room runs back along X and `+X` when it runs back
+    // along Z — the same mapping `world_of` uses.
+    let hi = off + 3;
+    let lo = off - lift::CORE_W - 1;
+    let hi_ok = hi + lift::CORE_W < across;
+    let lo_ok = lo > 0;
+    let core = if hi_ok && (!lo_ok || across - 1 - hi - lift::CORE_W >= lo) {
+        // Core on the far side of the doorway; the room, and the way you came
+        // in, are on the near side, so the doors face back that way.
+        Some(Core { a0: hi, door_a: hi, in_face: if ix != 0 { 2 } else { 0 } })
+    } else if lo_ok {
+        Some(Core {
+            a0: lo,
+            door_a: lo + lift::CORE_W - 1,
+            in_face: if ix != 0 { 3 } else { 1 },
+        })
+    } else {
+        None
+    };
+
+    Fabric { st, r, key, across, deep, off, ceiling, ix, iz, x0, z0, wx, wz, core }
+}
+
+impl Fabric {
+    /// The world cell of a local coordinate, before there is an `Interior` to
+    /// ask. Same mapping `Interior::world_of` uses, and it has to stay the same
+    /// one: the storey table is planned off this and the room is stamped off
+    /// that.
+    #[inline]
+    pub fn world_of(&self, a: i32, d: i32) -> (i32, i32) {
+        if self.ix > 0 {
+            (self.x0 + d, self.z0 + a)
+        } else if self.ix < 0 {
+            (self.x0 + self.wx - 1 - d, self.z0 + a)
+        } else if self.iz > 0 {
+            (self.x0 + a, self.z0 + d)
+        } else {
+            (self.x0 + a, self.z0 + self.wz - 1 - d)
+        }
+    }
+}
+
+/// **The floors a building serves, and whether it has a lift at all.**
+///
+/// A lift belongs in something with the height to justify it, and `height` is
+/// the building's own height at its entrance — the wall behind the doorway,
+/// which is the part of the building the shaft is cut down. The answer is a
+/// pure function of the seed and the plot, so a given building always has one
+/// or always does not; walk past it twice and it says the same thing.
+///
+/// Slabs land on whole units because a cell height is a whole unit and a wall
+/// on the seventh floor is just a tall one — that is what lets the raycaster,
+/// the collision and the depth buffer stay ignorant of storeys.
+pub fn plan_storeys(site: Site, height: u8) -> Vec<Storey> {
+    if height < lift::MIN_HEIGHT || fabric(site, 0).core.is_none() {
+        return Vec::new();
+    }
+    let roof = height as f32;
+    let mut out: Vec<Storey> = Vec::new();
+    let mut base = 0.0f32;
+    while out.len() < lift::MAX_FLOORS {
+        let n = out.len() as i32;
+        let f = fabric(site, n);
+        if base + f.ceiling + lift::SLAB > roof {
+            break;
+        }
+        out.push(Storey {
+            floor: n,
+            base,
+            ceiling: f.ceiling,
+            room: f.st.room,
+            wall_hue: f.st.wall_hue,
+            wall_sat: f.st.wall_sat,
+            light_hue: f.st.light_hue,
+            light_sat: f.st.light_sat,
+            ambient: f.st.ambient,
+        });
+        base = (base + f.ceiling + lift::SLAB).ceil();
+    }
+    if out.len() < lift::MIN_FLOORS {
+        return Vec::new();
+    }
+    out
+}
+
 impl Interior {
     /// World height of the ceiling plane.
     #[inline]
@@ -531,6 +785,48 @@ impl Interior {
             return None;
         }
         Some(self.cells[((gz - self.z0) * self.wx + (gx - self.x0)) as usize])
+    }
+
+    /// The continuous world point of a local coordinate — `a` across the
+    /// entrance's frontage, `d` in from it. `world_of` is this at whole cells;
+    /// a fixture on a wall needs it between them.
+    #[inline]
+    pub fn point_of(&self, a: f32, d: f32) -> (f32, f32) {
+        if self.ix > 0 {
+            (self.x0 as f32 + d, self.z0 as f32 + a)
+        } else if self.ix < 0 {
+            (self.x0 as f32 + self.wx as f32 - d, self.z0 as f32 + a)
+        } else if self.iz > 0 {
+            (self.x0 as f32 + a, self.z0 as f32 + d)
+        } else {
+            (self.x0 as f32 + a, self.z0 as f32 + self.wz as f32 - d)
+        }
+    }
+
+    /// **Which storey a world height is on, and how far above its slab.** The
+    /// one lookup the shaft wall is textured through, so the floors going past
+    /// the glass are the building's real floors and not a repeating pattern
+    /// that happens to look like some. A table is at most `MAX_FLOORS` long and
+    /// is walked from the top, so this is a handful of compares.
+    #[inline]
+    pub fn storey_at(&self, y: f32) -> Option<(&Storey, f32)> {
+        self.storeys
+            .iter()
+            .rev()
+            .find(|s| y >= s.base - lift::SLAB)
+            .map(|s| (s, y - s.base))
+    }
+
+    /// Where this floor sits in the building's own table.
+    #[inline]
+    pub fn storey_index(&self) -> Option<usize> {
+        self.storeys.iter().position(|s| s.floor == self.floor)
+    }
+
+    /// World height of the top of the shaft: the soffit over the well.
+    #[inline]
+    pub fn shaft_head(&self) -> f32 {
+        self.storeys.last().map(|s| (s.top() + lift::SLAB).ceil()).unwrap_or(0.0)
     }
 
     #[inline]
@@ -668,59 +964,21 @@ impl Interior {
     /// a given building is the same inside every time you walk in — and two
     /// different buildings are not.
     ///
-    /// `floor_no` is which storey, and `base` the world height of its slab.
-    /// Nothing below this line reads either of them as "probably zero": the
-    /// hash takes the floor number, so floor 0 and floor 31 of one building are
-    /// as different from each other as two buildings are.
-    pub fn build(
-        seed: i32,
-        dx: i32,
-        dz: i32,
-        face: u8,
-        plan_id: u16,
-        grain: i32,
-        floor_no: i32,
-        base: f32,
-    ) -> Interior {
-        let (ix, iz) = INWARD[(face as usize).min(3)];
-        let bx = dx.div_euclid(BLOCK);
-        let bz = dz.div_euclid(BLOCK);
-        let key = hash3(
-            bx.wrapping_mul(6301) + plan_id as i32,
-            bz.wrapping_mul(4507) + floor_no.wrapping_mul(9973),
-            seed ^ 0x1F7,
-        );
-        let mut r = Rng::new(key as u64 | ((plan_id as u64) << 32));
+    /// `floor_no` is which storey, `base` the world height of its slab, and
+    /// `storeys` the building's own floor table — empty for a building with no
+    /// lift, which is most of them. Nothing below this line reads the floor
+    /// number as "probably zero".
+    pub fn build(site: Site, floor_no: i32, base: f32, storeys: Vec<Storey>) -> Interior {
+        let f = fabric(site, floor_no);
+        let mut r = f.r;
+        let st = f.st;
+        let key = f.key;
+        let (ix, iz) = (f.ix, f.iz);
+        let ceiling = f.ceiling;
+        let (x0, z0, wx, wz) = (f.x0, f.z0, f.wx, f.wz);
+        let (dx, dz, face, plan_id, grain) = (site.dx, site.dz, site.face, site.plan, site.grain);
         let base = base.round();
-
-        // --- which room, and how big --------------------------------------
-        let st = &STYLES[(key % 10) as usize];
-        // Across the street frontage, and back from it. A room is never square
-        // by accident: the two come off different draws. Depth is kept near the
-        // depth of a real block, so the back wall is roughly where the back of
-        // the building is.
-        let across = 14 + r.below(12) as i32;
-        let deep = 15 + r.below(9) as i32;
-        let ceiling = st.ceil.0 + (st.ceil.1 - st.ceil.0) * r.f32();
         let top_h = (base + ceiling).ceil() as u8;
-
-        // The doorway is two cells wide; put it a little off the middle of the
-        // near wall, so you do not walk into every room down its own axis.
-        let off = 2 + r.below((across as u32).saturating_sub(6).max(1)) as i32;
-        let (x0, z0);
-        let (wx, wz);
-        if ix != 0 {
-            // Depth along X, across along Z.
-            wx = deep;
-            wz = across;
-            x0 = if ix > 0 { dx } else { dx - deep + 1 };
-            z0 = dz - off;
-        } else {
-            wx = across;
-            wz = deep;
-            x0 = dx - off;
-            z0 = if iz > 0 { dz } else { dz - deep + 1 };
-        }
 
         let ground = Cell {
             height: 0,
@@ -774,6 +1032,7 @@ impl Interior {
 
         let mut it = Interior {
             room: st.room,
+            site,
             floor: floor_no,
             label: [0; 40],
             label_len: 0,
@@ -787,6 +1046,10 @@ impl Interior {
             iz,
             door_cells: [(dx, dz), (dx, dz)],
             windows: Vec::new(),
+            sill: SILL,
+            core: if storeys.is_empty() { None } else { f.core },
+            storeys,
+            lift: None,
             floor_mat: st.floor_mat,
             wall_hue: st.wall_hue,
             wall_sat: st.wall_sat,
@@ -820,6 +1083,45 @@ impl Interior {
             }
         }
 
+        // --- the lift core -------------------------------------------------
+        // Solid floor to ceiling, with two doors in the flank that faces the
+        // room. From in here a lift is a box you walk up to; the shaft inside
+        // it is a mode away. It is carved BEFORE the glazing and the furniture
+        // so both simply find the cells taken.
+        if let Some(core) = it.core {
+            let shell = Cell { height: top_h, win: fit::LIFT, lit: 24, ..ground };
+            for a in core.a0..core.a0 + lift::CORE_W {
+                for d in 0..lift::CORE_D {
+                    let (gx, gz) = it.world_of(a, d);
+                    if let Some(c) = it.at_mut(gx, gz) {
+                        *c = shell;
+                    }
+                }
+            }
+            let step = if core.in_face % 2 == 0 { 1 } else { -1 };
+            for (a, d) in core.landing() {
+                let (gx, gz) = it.world_of(a, d);
+                if let Some(c) = it.at_mut(gx, gz) {
+                    c.height = 0;
+                    c.win = fit::FLOOR;
+                    c.surface = floor::THRESHOLD;
+                    // The same field, meaning the same thing it always means:
+                    // a threshold you can walk through, and which way is in.
+                    c.door = 9 + core.in_face;
+                    c.lit = 100;
+                }
+                // And the back of the recess, warm: a doorway one cell deep in
+                // a wall of the same steel as the wall reads as no doorway at
+                // all, which is what the first cut of this looked like.
+                let (bx, bz) = it.world_of(a + step, d);
+                if let Some(c) = it.at_mut(bx, bz) {
+                    c.hue = 44;
+                    c.sat = 48;
+                    c.lit = 90;
+                }
+            }
+        }
+
         it.glaze(st, &mut r);
         it.furnish(st, &mut r, key);
         it.fixtures(st, &mut r, key);
@@ -827,6 +1129,257 @@ impl Interior {
         it.tallest = it.cells.iter().map(|c| c.height).max().unwrap_or(top_h).max(top_h);
         it.flood_from_the_door();
         it
+    }
+
+    // --- the car ---------------------------------------------------------
+
+    /// **The glass car, built off the room you stepped in from.**
+    ///
+    /// It stands in exactly the world cells the core occupies, so stepping in
+    /// has no teleport in it — the same property that makes walking through a
+    /// street door honest. What it is made of is the whole feature:
+    ///
+    /// ```text
+    ///   d = 0            glass, and past it the CITY        (outward)
+    ///   d = 1 .. 2       the car floor, and you on it
+    ///   d = 3            glass, and past it the SHAFT        (inward)
+    ///   d = 4 .. 7       the well: open, no floor, no ceiling
+    ///   d = 8            the shaft wall, textured by STOREY
+    ///   a = 0, a = 4     the shaft walls, and the landing doors in one of them
+    /// ```
+    ///
+    /// Neither side is painted on. Outward, the car's grid simply stops and
+    /// `World::cell` falls through to the city — the same mechanism a room's
+    /// window has, and rising the height of a tower is a camera move the
+    /// elevated vista already makes, so the street falls away underneath you
+    /// correctly and for free. Inward, the well is open cells the DDA walks
+    /// straight through to a wall `CORE_D - 2` back, which is far enough for
+    /// the vertical field of view to cover a storey and a bit of it at once.
+    pub fn car(from: &Interior, at: usize) -> Interior {
+        let core = from.core.expect("a lift car in a building with no core");
+        let st = &from.storeys[at];
+        let head = from.shaft_head();
+        let top_h = head.min(u8::MAX as f32) as u8;
+
+        // The core's own rectangle, in world coordinates, with local `a`
+        // re-based to zero. `world_of` then means the same thing in the car
+        // that it means in the room it was cut out of.
+        let (x0, z0, wx, wz);
+        if from.ix != 0 {
+            wx = lift::CORE_D;
+            wz = lift::CORE_W;
+            x0 = if from.ix > 0 { from.x0 } else { from.x0 + from.wx - lift::CORE_D };
+            z0 = from.z0 + core.a0;
+        } else {
+            wx = lift::CORE_W;
+            wz = lift::CORE_D;
+            x0 = from.x0 + core.a0;
+            z0 = if from.iz > 0 { from.z0 } else { from.z0 + from.wz - lift::CORE_D };
+        }
+
+        let blank = Cell {
+            height: 0,
+            surface: floor::GRATE,
+            hue: CAR_HUE as u16,
+            sat: CAR_SAT as u8,
+            lit: 0,
+            win: fit::FLOOR,
+            arch: 0,
+            plan: from.site.plan,
+            cross: 255,
+            door: 0,
+        };
+        let mut it = Interior {
+            room: Room::Lobby,
+            site: from.site,
+            floor: st.floor,
+            label: [0; 40],
+            label_len: 0,
+            x0,
+            z0,
+            wx,
+            wz,
+            base: st.base,
+            ceiling: lift::CAR_CLEAR,
+            ix: from.ix,
+            iz: from.iz,
+            door_cells: [(0, 0), (0, 0)],
+            windows: Vec::new(),
+            sill: lift::CAR_SILL,
+            core: Some(Core { a0: 0, door_a: core.door_a - core.a0, in_face: core.in_face }),
+            storeys: from.storeys.clone(),
+            lift: Some(Lift::standing(at, st.base)),
+            floor_mat: floor::GRATE,
+            wall_hue: CAR_HUE,
+            wall_sat: CAR_SAT,
+            floor_hue: (CAR_HUE + 160.0) % 360.0,
+            light_hue: CAR_LIGHT_HUE,
+            light_sat: 34.0,
+            light_pitch: 1,
+            light_along_x: from.ix != 0,
+            light_phase: 0,
+            beam_pitch: 3,
+            // A car is a lit box you are standing in. There is no far end of it
+            // to fall off into shadow, so the falloff is only there to keep the
+            // near surfaces from flattening.
+            ambient: 1.0,
+            fall: 26.0,
+            tallest: top_h,
+            props: Vec::new(),
+            cells: vec![blank; (wx * wz) as usize],
+            to_exit: Vec::new(),
+        };
+
+        let shaft = Cell { height: top_h, win: fit::SHAFT, lit: 20, arch: 0, ..blank };
+        let car_top = (st.base + lift::CAR_CLEAR).ceil() as u8;
+        for a in 0..lift::CORE_W {
+            for d in 0..lift::CORE_D {
+                let (gx, gz) = it.world_of(a, d);
+                let side = a == 0 || a == lift::CORE_W - 1;
+                // A side wall alongside the CAR is the car's own wall — steel,
+                // a handrail, floor to ceiling — and one alongside the WELL is
+                // the shaft. They are different cells and they are different
+                // things, and drawing them the same is what made the car
+                // invisible from inside itself: at this range the car's own
+                // structure is the only thing that says you are in a box.
+                let cell = if side && d <= lift::GLASS_IN {
+                    Cell { height: car_top, win: fit::WALL, lit: 12, ..blank }
+                } else if side || d == lift::FACE_D {
+                    // `arch` marks the wall at the BACK of the shaft — the one
+                    // square to you as the car rises, and the only one that
+                    // carries the storeys and their numbers. Outdoors `arch` is
+                    // a roof shape; indoors, like `win` and `surface`, it is
+                    // reinterpreted rather than paid for with a new field.
+                    Cell { arch: u8::from(!side && d == lift::FACE_D), ..shaft }
+                } else if d == 0 || d == lift::GLASS_IN {
+                    Cell { height: 1, win: fit::WINDOW, lit: 70, ..blank }
+                } else if d >= lift::WELL_D0 {
+                    Cell { win: fit::WELL, ..blank }
+                } else {
+                    blank
+                };
+                if let Some(c) = it.at_mut(gx, gz) {
+                    *c = cell;
+                }
+            }
+        }
+        for (a, d) in it.core.unwrap().landing() {
+            it.door_cells[usize::from(d == lift::CAR_D1)] = it.world_of(a, d);
+        }
+
+        // The panel: two buttons, one at each end of the car. Which one is
+        // under your hand is which one you are standing at, and the HUD says so
+        // before you press. That is the whole of the interaction mechanism —
+        // one bit of the input bitmask, and `interaction_near` deciding what it
+        // means, exactly as it was built to.
+        for (kind, a) in [(Fitting::CallUp, 1.2), (Fitting::CallDown, lift::CORE_W as f32 - 1.2)]
+        {
+            let (px, pz) = it.point_of(a, 1.5);
+            it.props.push(Fixture {
+                x: px,
+                z: pz,
+                bottom: 1.02,
+                top: 1.54,
+                kind,
+                hue: CAR_LIGHT_HUE,
+                seed: 0x11F7 ^ (st.floor as u32),
+            });
+        }
+
+        it.name_car();
+        it.retune();
+        it.flood_from_the_door();
+        it
+    }
+
+    /// **Move the car.** Everything about it that depends on where it *is* —
+    /// the slab the camera stands on, the height its glass starts at, and
+    /// whether the landing doors are a threshold or a wall — is written here,
+    /// once a frame, over fifty cells. Nothing in the raycaster, the renderer
+    /// or the collision ever asks where the car is; they read the same grid
+    /// they read for a room.
+    ///
+    /// The doors are solid unless the car is standing level. That is the whole
+    /// of the interlock, and it is why you cannot walk out of a moving lift.
+    pub fn retune(&mut self) {
+        let Some(l) = self.lift else { return };
+        self.base = l.y;
+        // The floor a car is ON is the floor it is passing, not the one it set
+        // off from: on a four-storey ride `Lift::at` stays where the ride began
+        // until it ends, and an indicator that reads FLOOR 0 all the way to the
+        // ninth is worse than none.
+        let passing = self.storeys[l.passing(&self.storeys)].floor;
+        if passing != self.floor {
+            self.floor = passing;
+            self.name_car();
+        }
+        // A cell height is a whole unit; the sill this claims is read back off
+        // `Interior::sill` rather than off the cell, so the glass does not jump
+        // a unit at a time as the car rises. The cell height only has to be
+        // non-zero — enough to be solid, and enough for the DDA to record it.
+        let sill = ((l.y + lift::CAR_SILL).ceil() as u8).max(1);
+        for d in [0, lift::GLASS_IN] {
+            for a in 1..lift::CORE_W - 1 {
+                let (gx, gz) = self.world_of(a, d);
+                if let Some(c) = self.at_mut(gx, gz) {
+                    c.height = sill;
+                }
+            }
+        }
+        let open = l.level();
+        let in_face = self.core.map(|k| k.in_face).unwrap_or(0);
+        for (a, d) in self.core.map(|k| k.landing()).unwrap_or([(0, 0); 2]) {
+            let (gx, gz) = self.world_of(a, d);
+            if let Some(c) = self.at_mut(gx, gz) {
+                if open {
+                    c.height = 0;
+                    c.win = fit::FLOOR;
+                    c.surface = floor::THRESHOLD;
+                    c.door = 9 + in_face;
+                    c.lit = 100;
+                } else {
+                    // Between floors the doors are shut, and what you are
+                    // looking at is the back of them — the car's own leaves,
+                    // not the shaft behind them.
+                    c.height = (l.y + lift::CAR_CLEAR).ceil() as u8;
+                    c.win = fit::LIFT;
+                    c.surface = floor::GRATE;
+                    c.arch = 0;
+                    c.door = 0;
+                    c.lit = 30;
+                }
+            }
+        }
+    }
+
+    /// `LIFT / FLOOR n`. A car is the same car in every building, so unlike a
+    /// room it does not take the building's name — what you want to read in one
+    /// is which floor you are on.
+    fn name_car(&mut self) {
+        let mut n = 0usize;
+        let mut label = [0u8; 40];
+        for &c in b"LIFT / FLOOR " {
+            label[n] = c;
+            n += 1;
+        }
+        let mut d = [0u8; 4];
+        let mut k = 0;
+        let mut v = self.floor.unsigned_abs();
+        loop {
+            d[k] = b'0' + (v % 10) as u8;
+            k += 1;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        while k > 0 {
+            k -= 1;
+            label[n] = d[k];
+            n += 1;
+        }
+        self.label = label;
+        self.label_len = n;
     }
 
     /// How far every open cell is from the doorway, in cells. A plain BFS, run
@@ -906,9 +1459,15 @@ impl Interior {
         let doors = self.door_cells;
         let hue = self.wall_hue;
         let mut glass = Vec::new();
+        let core = self.core;
         for a in 1..aw - 1 {
             if (a - phase).rem_euclid(pitch) == 0 {
                 continue; // a pier, holding the wall up
+            }
+            // The lift core takes its own frontage: from in here that is a
+            // solid box, and the glass on it belongs to the car.
+            if core.is_some_and(|k| k.holds(a, 0)) {
+                continue;
             }
             let (gx, gz) = self.world_of(a, 0);
             if doors.iter().any(|&(dx, dz)| (dx, dz) == (gx, gz)) {
@@ -1094,6 +1653,28 @@ impl Interior {
             seed: key,
         });
 
+        // And one over the lift landing, if there is one, on the face of the
+        // core that the room can see.
+        if let Some(core) = self.core {
+            let (a, _) = core.landing()[0];
+            let out = if core.in_face % 2 == 0 { -0.15 } else { 1.15 };
+            let (px, pz) = self.point_of(a as f32 + out, 1.5 + lift::CAR_SILL);
+            self.props.push(Fixture {
+                x: px,
+                z: pz,
+                // Over the doors at door-head height, not up under the
+                // ceiling the way the exit sign is: a lobby ceiling here can be
+                // eight units up, and a sign you have to crane at is a sign
+                // that is off the top of the frame when you are looking at the
+                // doors.
+                bottom: 2.62,
+                top: 3.34,
+                kind: Fitting::LiftSign,
+                hue: 44.0,
+                seed: key ^ 0x5A17,
+            });
+        }
+
         let (aw, dd) = if self.ix != 0 { (self.wz, self.wx) } else { (self.wx, self.wz) };
         let want = 3 + (key >> 3) % 7;
         let menu = [Fitting::Terminal, Fitting::Notice, Fitting::Lamp, Fitting::Plant, Fitting::Vent];
@@ -1102,7 +1683,7 @@ impl Interior {
             let a = 2 + r.below((aw as u32).saturating_sub(4).max(1)) as i32;
             let d = 3 + r.below((dd as u32).saturating_sub(5).max(1)) as i32;
             let (gx, gz) = self.world_of(a, d);
-            if !self.open(gx, gz) {
+            if !self.at(gx, gz).is_some_and(|c| c.height == 0 && c.door == 0) {
                 continue;
             }
             let (bottom, top) = match kind {

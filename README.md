@@ -24,10 +24,11 @@ as you move through it, running faster than your monitor can show you.
 |  |  |
 |---|---|
 | **Native Rust** | one crate, and exactly one dependency (`libc`, for termios). No browser, no runtime, no node, no wasm on the default path |
-| **0.577 ms a frame** | 180×60, measured on the current build — a 1,730 fps ceiling. [What a frame costs](docs/performance.md) |
+| **0.584 ms a frame** | 180×60, measured on the current build — a 1,710 fps ceiling. [What a frame costs](docs/performance.md) |
 | **3.2 MB resident** | there is no world grid; every cell is a pure function of its coordinate, so the city is **unbounded** and walking further costs nothing |
 | **The world** | avenues and junctions, towers with six different silhouettes, lit storefronts, traffic carrying **readable registration plates**, pedestrians, lampposts, street trees, rain you can turn on, and a star field behind it all |
 | **The insides** | every street-facing building has a door. Walk through it and you are in a real room — furniture, fixtures, and a glazed wall you can see the actual city through |
+| **The lift** | a tall building has a glass car in a shaft. Press the panel and it takes you up — the floors sliding past on one side, the street falling away on the other |
 | **Runs anywhere a terminal does** | 24-bit ANSI; it sizes itself to your window |
 
 ## Run it
@@ -50,7 +51,8 @@ straight through — `./play --demo`, `./play --help`, and every flag below.
 | `R` `F` | look up / down | space or shift | sprint |
 | `E` `C` / PgUp PgDn | rise / sink | `V` | street ↔ elevated vista |
 | `T` | weather: clear / rain / downpour | `Tab` | lock a walk on |
-| `M` | hand over to the autopilot | `P` | write the frame to disk |
+| `X` or Enter | act on what is in reach — the lift panel | `M` | hand over to the autopilot |
+| `P` | write the frame to disk | | |
 | `Q` or Esc | quit | | |
 
 Keys are held for exactly as long as your finger is on them in any terminal
@@ -82,22 +84,20 @@ Every one of these is a real frame out of the engine, same seed, same city.
 ./play --weather downpour --variety 0.4       # wetter, and a more regular district
 ./play --vista --out shots --name skyline     # one skyline frame, to .svg and .txt
 ./play --doorway --out shots                  # in through a door and back out, as frames
+./play --lift --out shots                     # into the lift, up it, and out on to a floor
 ./play --film --weather rain --out frames     # every tick, ready for ffmpeg
 ./play --bench                                # per-frame cost: sim / cast / render / paint
 ```
 
 ## Coming next
 
-- **A glass elevator.** Step into the car in a tall building, press the panel,
-  and watch the floors go past on one side and the street fall away on the
-  other. Being built now — glazing is a property of a *cell*, so a car glazed
-  on four sides sees out on four sides while it moves.
-- **Floors above the first.** `Interior::build` already takes a storey and a
-  slab height, and `Cell::height` is absolute world height, so a wall on the
-  thirty-first floor is simply a tall one.
-- **Fixtures you can use.** Every terminal, notice board and exit sign in a
-  room already carries a label, a verb and a reach, and the HUD tells you what
-  is within arm's length. Pressing the key is the part that is missing.
+- **More to press.** Every terminal, notice board and exit sign in a room
+  already carries a label, a verb and a reach, and `X` now acts on whatever is
+  nearest — the lift panel is the first thing it does something with. The rest
+  is a matter of deciding what a terminal should say.
+- **Down as well as up.** The shaft is cut to the roof, not below it: there are
+  no basements and no plant levels yet, and the storey table is where they
+  would go.
 - **More than a terminal.** The engine decides the whole picture and hands a
   frontend one flat buffer of characters and colours; a frontend only paints
   it. The terminal is one. A browser canvas is already another
@@ -111,6 +111,7 @@ Every one of these is a real frame out of the engine, same seed, same city.
 | [The shape of the engine](docs/architecture.md) | crate layout, the no-grid world, the projection, the browser target |
 | [Generating the city](docs/world-generation.md) | blocks and plots, six building silhouettes, the `--variety` knob |
 | [Doors, rooms and windows](docs/interiors.md) | how inside and outside are one mode, and how you see out |
+| [A glass lift](docs/lift.md) | which buildings get one, the panel, and the floors going past |
 | [Registration plates](docs/registration-plates.md) | drawn out of characters, sized to the registration, honest at distance — the idea came from [regtransfers.co.uk](https://www.regtransfers.co.uk/) |
 | [Weather and what is on the pavement](docs/weather-and-streets.md) | rain, stars, lamps, trees |
 | [Recording a film](docs/film.md) | `--film`, the script format, the ffmpeg pipeline |
