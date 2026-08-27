@@ -401,16 +401,35 @@ const PLATE_LETTERS: &[u8; 24] = b"ABCDEFGHJKLMNOPRSTUVWXYZ";
 /// September plates 51..75.
 const PLATE_AGES: [u8; 2] = [0, 50];
 
+/// The committed default registrations: real plates the operator has for
+/// sale, shipped as data rather than as a string literal in this file, so
+/// the stock can change without anybody touching code. One registration per
+/// line, same format `--plates-file` reads — see `registrations.txt` itself.
+const DEFAULT_REGISTRATIONS: &str = include_str!("registrations.txt");
+
+/// Where a `Plates` set came from. Only used to phrase the note a run prints
+/// about its own plates, so a generated placeholder is never mistaken for a
+/// real registration and a real one is never reported as if it were typed in
+/// on the command line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PlateSource {
+    /// Plausible-looking patterns derived from `--seed`. Not real.
+    Generated,
+    /// `registrations.txt`, committed to the repo: real registrations, until
+    /// the operator overrides them.
+    Default,
+    /// `--plates` / `--plates-file`: the operator's own list.
+    Supplied,
+}
+
 /// The registrations the traffic carries.
 ///
 /// Either the operator's own list — `--plates` or `--plates-file` — or, with
-/// no list given, a set generated from the seed so the feature is visible out
-/// of the box. `generated` says which, and the binary says so on screen and in
-/// `--help`: a generated plate is a plausible-looking pattern, not a real
-/// registration belonging to anybody.
+/// neither given, the committed default in `registrations.txt`. `source`
+/// says which, and the binary says so on screen and in `--help`.
 pub struct Plates {
     list: Vec<Plate>,
-    pub generated: bool,
+    pub source: PlateSource,
 }
 
 impl Plates {
@@ -428,7 +447,25 @@ impl Plates {
         if list.is_empty() {
             return (Plates::from_seed(0xACC17, 128), dropped);
         }
-        (Plates { list, generated: false }, dropped)
+        (Plates { list, source: PlateSource::Supplied }, dropped)
+    }
+
+    /// The list every run carries with no `--plates`, `--plates-file` or
+    /// `--no-plates` given: the committed registrations in
+    /// `registrations.txt`. Falls back to a generated set only if that file
+    /// were ever left with nothing usable in it, so the traffic is never
+    /// blank.
+    pub fn default_set() -> Plates {
+        let lines: Vec<&str> = DEFAULT_REGISTRATIONS
+            .lines()
+            .map(|l| l.split('#').next().unwrap_or("").trim())
+            .filter(|l| !l.is_empty())
+            .collect();
+        let (mut plates, _dropped) = Plates::from_list(&lines);
+        if plates.source == PlateSource::Supplied {
+            plates.source = PlateSource::Default;
+        }
+        plates
     }
 
     /// `n` plausible current-style registrations — `LLNN LLL` — derived from
@@ -450,12 +487,20 @@ impl Plates {
             }
             list.push(Plate { text, len: 8 });
         }
-        Plates { list, generated: true }
+        Plates { list, source: PlateSource::Generated }
     }
 
     #[inline]
     pub fn len(&self) -> usize {
         self.list.len()
+    }
+
+    /// Every registration actually on the road, in list order. Nothing on
+    /// the draw path touches this — `get` is what a frame draws from — it is
+    /// for tooling that wants to check what a set really carries, whichever
+    /// of `default_set` / `from_list` / `from_seed` built it.
+    pub fn all(&self) -> &[Plate] {
+        &self.list
     }
 
     #[inline]
@@ -490,7 +535,7 @@ impl Plates {
 
 impl Default for Plates {
     fn default() -> Self {
-        Plates::from_seed(0xACC17, 128)
+        Plates::default_set()
     }
 }
 

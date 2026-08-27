@@ -1,6 +1,9 @@
 # Registration plates
 
 Every car on the road carries one, and close up it is **real readable text**.
+The idea came from [regtransfers.co.uk](https://www.regtransfers.co.uk/), a
+private registration dealer — which is also where the committed default list
+below comes from.
 
 ```bash
 cargo run --release -- --plates "AB12 CDE,K9 PAW,1 RG"
@@ -73,10 +76,14 @@ given, and either more than once; the entries all land in one pool. Entries are
 folded to upper case and anything a plate cannot carry is dropped, so
 `ab12-cde` and `AB12 CDE` are the same plate; a plate is cut to 10 characters.
 
-**With no list given** the traffic carries registrations **generated from the
-seed** so the feature is visible out of the box. Those are plausible-looking
-patterns — they are *not* real registrations and are not claimed to belong to
-anybody. The binary says so whenever it says how many plates it has.
+**With no list given** the traffic carries the committed default in
+[`../src/registrations.txt`](../src/registrations.txt) — real registrations,
+not generated placeholders, one per line in the same format `--plates-file`
+reads. That is what a plain `cargo run --release` or `./play` shows with no
+flag to remember. Change the stock by editing that file; nothing in the code
+needs to change. The binary says which of the three it is carrying —
+generated, default, or supplied — whenever it says how many plates it has.
+`--no-plates` still turns them off entirely.
 
 A car keeps its plate for as long as it is on the road, and the same `--seed`
 always hands the same cars the same plates. It may take a new one when it is
@@ -104,8 +111,16 @@ cargo run --release -- --plate-shot --plates-file tools/plates-example.txt \
 `--plate-shot` drives the same simulation the game does, scores every frame on
 the plates themselves — read off the grid's background plane, which nothing but
 a plate ever paints — and writes the best frame for each of the three bands as
-`.svg` and `.txt`. It also prints which registrations from your list appear
-verbatim in the frame's own characters, which is the honest legibility check:
-the frame's characters are the characters a reader sees.
+`.svg` and `.txt`. It also prints which registrations from whatever list is
+actually on the road appear verbatim in the frame's own characters, which is
+the honest legibility check: the frame's characters are the characters a
+reader sees. That check runs against the committed default the same as it
+does against `--plates`/`--plates-file` — `docs/frames/plates-realplates-near.png`
+and `-middle.png` are that check's evidence for the default list, shot with no
+flag at all:
+
+```bash
+cargo run --release -- --plate-shot --out docs/frames --name plates-realplates
+```
 
 See [Performance](performance.md) for what all of this costs per frame.

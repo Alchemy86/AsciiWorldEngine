@@ -1,0 +1,39 @@
+# The default registration list this engine ships with.
+#
+# These are real, currently-held private registrations, for sale by their
+# owner — not generated placeholders and not made up for a demo. Every run
+# carries these unless told otherwise: --plates, --plates-file or
+# --no-plates overrides them; nothing about drawing a plate does.
+#
+# The plates feature itself was inspired by regtransfers.co.uk
+# (https://www.regtransfers.co.uk/), a private registration dealer — and is
+# where this list comes from.
+#
+# One registration per line, same format --plates-file reads: blank lines
+# and #-comments are skipped, entries are folded to upper case, and anything
+# a plate cannot carry is dropped. Edit this file to change the stock —
+# nothing in the code needs to change.
+1980 GC
+FFW 66
+1 SOO
+ENM 11D
+444 AFJ
+65 NN
+80 FL
+8 RBT
+BUT 70N
+BVC 44
+D3 BUT
+DEL 5
+EEE 56
+EFD 678
+FSJ 760
+GF 1
+GYT 938
+LC 1
+M42 LOW
+NFS 1
+PAM 314S
+RHJ 96
+ROY 526
+S74 MPS

@@ -3,7 +3,9 @@
 # Entries are folded to upper case; anything a plate cannot carry is dropped.
 #
 # These are made up for the demo. They are not real registrations and are not
-# claimed to belong to anybody.
+# claimed to belong to anybody. The plates feature itself was inspired by
+# regtransfers.co.uk (https://www.regtransfers.co.uk/), a private
+# registration dealer — see src/registrations.txt for the real default list.
 AB12 CDE
 K9 PAW
 1 RG

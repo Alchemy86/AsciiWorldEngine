@@ -111,7 +111,7 @@ Every one of these is a real frame out of the engine, same seed, same city.
 | [The shape of the engine](docs/architecture.md) | crate layout, the no-grid world, the projection, the browser target |
 | [Generating the city](docs/world-generation.md) | blocks and plots, six building silhouettes, the `--variety` knob |
 | [Doors, rooms and windows](docs/interiors.md) | how inside and outside are one mode, and how you see out |
-| [Registration plates](docs/registration-plates.md) | drawn out of characters, sized to the registration, honest at distance |
+| [Registration plates](docs/registration-plates.md) | drawn out of characters, sized to the registration, honest at distance — the idea came from [regtransfers.co.uk](https://www.regtransfers.co.uk/) |
 | [Weather and what is on the pavement](docs/weather-and-streets.md) | rain, stars, lamps, trees |
 | [Recording a film](docs/film.md) | `--film`, the script format, the ffmpeg pipeline |
 | [The city walking itself](docs/self-playing.md) | `--demo`, and how it differs from a recording |
@@ -121,6 +121,7 @@ Every one of these is a real frame out of the engine, same seed, same city.
 
 ## Licence
 
-All rights reserved. This is proprietary software — see
-[`LICENSE`](LICENSE) for the full terms and how to request permission to use,
-copy, modify, or distribute it.
+[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0/).
+Personal and noncommercial use is free; commercial use needs permission from
+Aaron Gibson first. See [`LICENSE`](LICENSE) for the full terms — that text,
+unmodified, is what actually governs use.

@@ -14,7 +14,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 description = "An ASCII 3D city — world, movement, projection and renderer, all in Rust"
-license-file = "LICENSE"
+license = "PolyForm-Noncommercial-1.0.0"
 authors = ["Aaron Gibson"]
 publish = false
 

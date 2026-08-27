@@ -16,7 +16,7 @@ use asciicity::camera::key;
 use asciicity::rng::Rng;
 use asciicity::term::{terminal_size, Keyboard, RawTerm};
 use asciicity::world::World;
-use asciicity::palette::Plate;
+use asciicity::palette::PlateSource;
 use asciicity::{grid_to_ansi, grid_to_svg, grid_to_text, Camera, Engine};
 
 /// A terminal character is about twice as tall as it is wide. That ratio is
@@ -269,10 +269,9 @@ fn help() {
            Entries are folded to upper case and anything a plate cannot carry\n  \
            is dropped, so \"ab12-cde\" and \"AB12 CDE\" are the same plate. A\n  \
            plate is cut to 10 characters.\n\n  \
-           WITH NO LIST GIVEN the traffic carries registrations GENERATED from\n  \
-           the seed. Those are plausible-looking patterns so the feature is\n  \
-           visible out of the box — they are NOT real registrations and are not\n  \
-           claimed to belong to anybody.\n"
+           WITH NO LIST GIVEN the traffic carries the committed default in\n  \
+           src/registrations.txt — real registrations, not generated\n  \
+           placeholders. Edit that file to change the stock; no flag needed.\n"
     );
 }
 
@@ -298,11 +297,19 @@ fn plate_note(a: &Args, eng: &Engine) -> String {
     if !a.plates_on {
         return "plates off (--no-plates)".into();
     }
-    if eng.pop.plates.generated {
-        format!("{} plates GENERATED from seed {} — plausible patterns, not real \
-registrations. Pass --plates or --plates-file for your own.", eng.pop.plates.len(), a.seed)
-    } else {
-        format!("{} supplied plates", eng.pop.plates.len())
+    match eng.pop.plates.source {
+        PlateSource::Generated => format!(
+            "{} plates GENERATED from seed {} — plausible patterns, not real \
+registrations. Pass --plates or --plates-file for your own.",
+            eng.pop.plates.len(),
+            a.seed
+        ),
+        PlateSource::Default => format!(
+            "{} default plates (src/registrations.txt) — pass --plates or \
+--plates-file for your own.",
+            eng.pop.plates.len()
+        ),
+        PlateSource::Supplied => format!("{} supplied plates", eng.pop.plates.len()),
     }
 }
 
@@ -1505,10 +1512,15 @@ biggest car wholly in shot {tallest:.0} rows tall at {nearest:.1} units"
     // means any of the three even pitches it can be set at, not just the tight
     // one. `RT08 AAR` on a near car reads `R T 0 8   A A R`, and that is the
     // registration, not something else.
-    let wanted: Vec<(String, Vec<String>)> = a
+    //
+    // Checked against what is actually ON THE ROAD — `eng.pop.plates`, not
+    // `a.plates` — so the check runs whether the list came from `--plates`,
+    // from a file, or (the common case) from nobody having passed either.
+    let wanted: Vec<(String, Vec<String>)> = eng
+        .pop
         .plates
+        .all()
         .iter()
-        .filter_map(|p| Plate::parse(p))
         .map(|q| {
             let mut buf = [b' '; asciicity::palette::PLATE_SET_MAX];
             let forms = (0..asciicity::palette::PLATE_SETTINGS)

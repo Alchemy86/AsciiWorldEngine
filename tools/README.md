@@ -52,8 +52,10 @@ every setting — the knob makes pattern and colour uniform, not the skyline.
 
 ## Registration plates
 
-Every car on the road carries a registration plate, and the list is yours to
-supply.
+Every car on the road carries a registration plate. With no flag it carries
+the committed default; every flag below still works to override that. The
+feature itself was inspired by [regtransfers.co.uk](https://www.regtransfers.co.uk/),
+a private registration dealer.
 
 ```bash
 # a comma-separated list, straight on the command line
@@ -68,9 +70,12 @@ cargo run --release -- --plates "BOSS 1" --plates-file tools/plates-example.txt
 # do not draw plates at all
 cargo run --release -- --no-plates
 
-# write the three evidence frames: near, middle and far
+# write the three evidence frames for a supplied list: near, middle and far
 cargo run --release -- --plate-shot --plates-file tools/plates-example.txt \
     --out docs/frames --name plates
+
+# the same, for the committed default — no flag needed
+cargo run --release -- --plate-shot --out docs/frames --name plates-realplates
 ```
 
 [`plates-example.txt`](plates-example.txt) is the file format: one registration
@@ -79,11 +84,13 @@ case and anything a plate cannot carry — punctuation other than a separator �
 is dropped, so `ab12-cde` and `AB12 CDE` are the same plate. A plate is cut to
 10 characters.
 
-**With no list given**, the traffic carries registrations **generated from the
-`--seed`**. They are plausible-looking current-style patterns so the feature is
-visible out of the box; they are **not real registrations** and are not claimed
-to belong to anybody. Every mode that reports its plates says which of the two
-it has.
+**With no list given**, the traffic carries the committed default in
+[`../src/registrations.txt`](../src/registrations.txt) — real registrations in
+the same file format, baked into the binary so no flag or working directory
+matters. Change the stock by editing that file and rebuilding; nothing else
+needs to change. Every mode that reports its plates says which of the three it
+has: generated (only reachable if that file were ever left empty), default, or
+supplied.
 
 A car keeps its plate for as long as it is on the road, and the same seed hands
 the same cars the same plates. Close up a plate is real readable text — bold
@@ -100,10 +107,12 @@ a plate ever paints — and writes the best frame for each of the three bands as
 carrying rather than on how wide it is: since the panel took real plate
 proportions the two are no longer the same question, and a two-letter private
 registration now sits on a panel as wide as an eight-character one — which is
-what a private plate looks like. It also prints which registrations from your
-list appear verbatim in the frame's own characters, which is the honest
-legibility check: the frame's characters are the characters a reader sees.
-[`../docs/plates.png`](../docs/plates.png) is the committed evidence set and
+what a private plate looks like. It also prints which registrations from
+whatever list is actually on the road appear verbatim in the frame's own
+characters, which is the honest legibility check: the frame's characters are
+the characters a reader sees. [`../docs/plates.png`](../docs/plates.png) is the
+committed evidence set for a supplied list and
 [`../docs/plate-look.png`](../docs/plate-look.png) the before-and-after on the
-panel's own look.
+panel's own look; [`../docs/frames/plates-realplates-near.png`](../docs/frames/plates-realplates-near.png)
+and `-middle.png` are the same evidence for the committed default.
 

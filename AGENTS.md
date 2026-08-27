@@ -288,14 +288,29 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   SHAPE instead: a rectangle closed on all sides is a stronger "this is an
   object" signal than weight ever was at one character per cell.
 - `--plate-shot` is the evidence tool. It scores frames on the background plane
-  — nothing but a plate ever paints one — and prints which supplied
-  registrations appear on the frame, which is the honest legibility check.
+  — nothing but a plate ever paints one — and prints which registrations from
+  whatever list is actually on the road (`eng.pop.plates`, not the raw
+  `--plates` argv) appear on the frame, which is the honest legibility check.
   "Appear" means any of the three settings of `Plate::settings`, not the tight
   one alone, because `RT08 AAR` on a near car is drawn `RT08   AAR`; a plain
   `contains` of the supplied string reports a false negative and did. The near
   band scores on the CHARACTERS a panel carries, not its width. `--at X,Z`
   fixes `--vista`'s camera, which is the only way two settings of `--seed` or
   `--variety` are comparable.
+- **The traffic's default registrations are committed data, in
+  `src/registrations.txt`, `include_str!`'d into `palette::Plates::default_set`
+  — not a string literal in the renderer and not generated from the seed.**
+  `entities::Population::new` calls `default_set()` directly, so a plain
+  `cargo run --release` / `./play` with no flag carries that list; `--plates`,
+  `--plates-file` and `--no-plates` all still override it exactly as before.
+  `palette::PlateSource` (`Generated` / `Default` / `Supplied`) replaced the old
+  `Plates::generated: bool` so the on-screen note and `--plate-shot` can tell a
+  real committed list apart from both a CLI-supplied one and the seed-derived
+  placeholder patterns (the placeholder path only remains reachable if
+  `registrations.txt` were ever left with nothing usable in it). The file
+  lives under `src/` rather than a top-level `data/` specifically so `./play`'s
+  own staleness check (`find src Cargo.toml -newer target/release/asciicity`)
+  picks up an edit to it without needing a change to `play` itself.
 - **Measuring a plate from the SVG beats reading it off a picture.** The panel
   is a `<rect>` whose `fill` is `#ffcc00` (rear) or `#f6f6f0` (front) and whose
   width is cells x 11px; the registration is the `<text>` with `font-weight="900"`
@@ -436,6 +451,15 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 ## Documentation and brand
 
+- **Licence: PolyForm Noncommercial 1.0.0, not all-rights-reserved.** `LICENSE`
+  holds the license text byte-for-byte from `polyformproject.org` (fetched via
+  the GitHub API's git-blob endpoint, not typed from memory or paraphrased) —
+  never hand-edit the body; PolyForm's own terms require removing every mention
+  of "PolyForm" from a text that has been changed. The plain-English summary
+  above the `---` separator is explicitly a non-binding note, not a licence
+  term. `Cargo.toml` uses `license = "PolyForm-Noncommercial-1.0.0"` (the exact
+  SPDX id — check `spdx/license-list-data`'s `json/details/` if it is ever
+  bumped), not `license-file`.
 - **The README is a shop window, not a manual.** Logo, thanks, summary, key
   details, one-command run, controls, pictures, examples, links, licence — and
   nothing else. Anything longer than a paragraph belongs on a page in `docs/`

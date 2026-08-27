@@ -35,8 +35,8 @@ pub struct Actor {
 pub struct Population {
     pub peds: Vec<Actor>,
     pub vehs: Vec<Actor>,
-    /// The registrations on the road. Supplied by the operator or generated
-    /// from the seed; see `palette::Plates`.
+    /// The registrations on the road: the committed default, unless the
+    /// operator supplies or disables one; see `palette::Plates`.
     pub plates: Plates,
     /// Whether plates are drawn at all. Text on every visible car is real
     /// per-frame work, so it is a switch rather than something every run pays
@@ -50,7 +50,7 @@ impl Population {
         let mut p = Population {
             peds: vec![Actor::default(); PED_COUNT],
             vehs: vec![Actor::default(); VEH_COUNT],
-            plates: Plates::from_seed(seed, 128),
+            plates: Plates::default_set(),
             plates_on: true,
             rng: Rng::new(seed ^ 0xC0FFEE),
         };
