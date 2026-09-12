@@ -475,6 +475,33 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   Same rule that deleted `SIGN_TYPES`: one table saying what a building is. A
   pylon outside a clinic cannot advertise cold beer because the only thing it
   can ask is the room that is actually behind the door.
+- **`PYLON_CROSS` was numerically identical to `TREE_CROSS` — `[1, 14]`, one
+  cell of pavement out — and a tree is deliberately planted THAT close to the
+  building line while a freestanding sign is not, so a pylon's panel drew
+  right over the facade behind it.** `wall_inward` puts the nearest wall
+  `cross + 1` cells out from a furniture cell at a given cross offset (see
+  `street_cell`'s pavement/roadway layout); `PYLON_CROSS` is now `KERB_CROSS`
+  (`[4, 11]`), giving five clear cells instead of two, for the same reason a
+  bus stop and a hatch already stand there — a sign is read from the road, not
+  planted against the wall. `a_pylon_never_stands_on_the_building_it_advertises`
+  walks from every pylon toward the building its arrow names and requires a
+  few open cells first; it is a real regression guard, not a value check,
+  because the bug survived a purely numeric comparison of the two constants —
+  it took `--drivethru` plus a headless-Chrome screenshot to actually SEE the
+  panel drawn over the facade before the fix looked necessary at all.
+- **A fast-food unit's pylon stands at the bay it serves, not on the generic
+  street-furniture lattice**, because a drive-through sign belongs by the lane
+  a car stops in. It is generated in the SAME kerb walk as the hatch (one
+  entrance, one hatch, one sign), nudged a couple of cells along the street so
+  it does not sit on top of the hatch, and the generic per-street-line
+  `Prop::Pylon` branch explicitly skips any building whose `interior::ground_room`
+  is `Room::FastFood` so a unit never gets two. Its arrow still points at the
+  business it names (not at the bay) — the same invariant every other pylon
+  keeps and `a_pylon_names_the_business_behind_it_and_points_at_it` checks —
+  so "at the bay" is a POSITION choice, not a facing exception.
+  `a_fast_food_pylon_stands_at_its_own_drive_through_bay` is the regression
+  test, checking a real `World::drive_bay` is within a few cells of every
+  fast-food pylon found.
 - **A drive-through is three bits of code that never speak and cannot
   disagree.** The paint on the road, the hatch on the pavement and the car that
   stops all call `World::drive_bay`, a pure function of the road. There is no

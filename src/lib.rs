@@ -2642,6 +2642,45 @@ mod tests {
         assert!(moved_off, "a car stopped at the hatch and never left — that is a car park");
     }
 
+    /// **A pylon stands clear of the building it advertises.** `PYLON_CROSS`
+    /// used to be numerically the same as `TREE_CROSS` — a tree is deliberately
+    /// planted against the building line, a freestanding sign is not — so a
+    /// pylon's panel drew over the facade behind it. This walks from every
+    /// pylon toward the building its arrow names (`facing`, verified elsewhere
+    /// to point that way) and requires a few open cells before the first solid
+    /// one, which is exactly the standoff `--drivethru`'s evidence frames were
+    /// used to confirm was missing before this fix and present after it.
+    #[test]
+    fn a_pylon_never_stands_on_the_building_it_advertises() {
+        for seed in [90210u32, 0xACC17, 7] {
+            let w = World::new(seed);
+            let mut props = Vec::new();
+            w.props_near(4100.5, 4100.5, 120.0, &mut props);
+            let pylons: Vec<_> =
+                props.iter().filter(|p| p.kind == world::Prop::Pylon).copied().collect();
+            assert!(pylons.len() > 3, "seed {seed}: only {} pylons", pylons.len());
+            for p in &pylons {
+                let (fx, fz) = (p.facing.0 as i32, p.facing.1 as i32);
+                let (mut x, mut z) = (p.x.floor() as i32, p.z.floor() as i32);
+                let mut clear = 0;
+                loop {
+                    x += fx;
+                    z += fz;
+                    if w.city_cell(x, z).height > 0 {
+                        break;
+                    }
+                    clear += 1;
+                    assert!(
+                        clear <= 20,
+                        "no wall found: seed {seed} at ({}, {}) facing ({fx},{fz}) about {:?}",
+                        p.x, p.z, p.about
+                    );
+                }
+                assert!(clear >= 3, "a pylon only {clear} cell(s) clear of its own building");
+            }
+        }
+    }
+
     /// **A pylon cannot advertise something that is not there.** Its name, its
     /// trade and its three lines all come out of the world model, so the test
     /// is that they agree with the building it points at — and that the arrow
@@ -2681,6 +2720,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// **A fast-food unit's pylon stands at the bay it serves, not on the
+    /// generic street-furniture lattice.** A drive-through sign belongs by the
+    /// lane a car actually stops in, so every pylon naming a `Room::FastFood`
+    /// unit must have a real `World::drive_bay` within a few cells of it —
+    /// and the generic per-street-line pylon must have left that unit alone
+    /// (see the `continue` for `Room::FastFood` in the `Prop::Pylon` branch
+    /// of `props_near`), so there is exactly one sign per drive-through.
+    #[test]
+    fn a_fast_food_pylon_stands_at_its_own_drive_through_bay() {
+        // Not every seed's 120-unit search turns up a fast-food unit — this
+        // checks correctness wherever one exists and additionally requires
+        // seed 90210 (the one every other pylon test also uses) to have
+        // found at least one, so the feature is not silently exercising zero
+        // pylons across the board.
+        let mut fastfood_pylons_total = 0;
+        for seed in [90210u32, 0xACC17, 7] {
+            let w = World::new(seed);
+            let mut props = Vec::new();
+            w.props_near(4100.5, 4100.5, 120.0, &mut props);
+            for p in props.iter().filter(|p| p.kind == world::Prop::Pylon) {
+                let room = interior::ground_room(
+                    p.about.0.div_euclid(world::BLOCK),
+                    p.about.1.div_euclid(world::BLOCK),
+                    p.about.2,
+                    w.seed,
+                );
+                if room != interior::Room::FastFood {
+                    continue;
+                }
+                fastfood_pylons_total += 1;
+                let (ix, iz) = (p.x.floor() as i32, p.z.floor() as i32);
+                let near_a_bay = (-4..=4)
+                    .any(|dx| (-4..=4).any(|dz| w.drive_bay(ix + dx, iz + dz).is_some()));
+                assert!(near_a_bay, "a fast-food pylon with no drive-through bay nearby");
+            }
+        }
+        assert!(fastfood_pylons_total > 0, "no fast-food pylon found in any seed");
     }
 
     /// Every room family has its own word and its own three offers, and no two

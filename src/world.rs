@@ -845,8 +845,15 @@ const BOOTH_CROSS: [i32; 2] = [3, 12];
 /// A bus stop and a serving hatch both stand AT the kerb, because both are
 /// served from the carriageway.
 const KERB_CROSS: [i32; 2] = [4, 11];
-/// A pylon stands clear of the walking line and clear of the lamps.
-const PYLON_CROSS: [i32; 2] = [1, 14];
+/// A pylon stands clear of the walking line and clear of the lamps: at the
+/// kerb, like the bus stop and the hatch, because a freestanding sign is
+/// there to be read from the road, not to be planted against the building
+/// line the way a tree is. `wall_inward` puts the nearest wall `cross + 1`
+/// cells from a furniture cell at this offset (see `street_cell`), so a
+/// pylon here stands a full five cells clear of it — the old value shared
+/// with `TREE_CROSS` put it two cells out, close enough to draw its panel
+/// over the facade behind it. See `a_pylon_never_stands_on_the_building_it_advertises`.
+const PYLON_CROSS: [i32; 2] = KERB_CROSS;
 /// Spacing along the street, in cells. Deliberately coprime with each other and
 /// with the 32-cell block, so lamps, trees and planters do not line up into
 /// rows of three.
@@ -1153,7 +1160,56 @@ impl World {
                                     }
                                     // It faces the road it serves, not the shop
                                     // behind it.
-                                    (b, (-sx as i8, -sz as i8))
+                                    let facing = (-sx as i8, -sz as i8);
+                                    // **A drive-through gets its own pylon, at
+                                    // the bay it serves rather than on the
+                                    // generic street-furniture lattice.** It
+                                    // stands beside the hatch (not on top of
+                                    // it — the along-street nudge keeps it off
+                                    // the exact cell the hatch itself stands
+                                    // on) and its arrow still points at the
+                                    // business it names, the same invariant
+                                    // every other pylon keeps
+                                    // (`a_pylon_names_the_business_behind_it_and_points_at_it`).
+                                    let (ox, oz) = if along_x { (2, 0) } else { (0, 2) };
+                                    let (px, pz) = (gx + ox, gz + oz);
+                                    let sign_cell = self.city_cell(px, pz);
+                                    // The nudge can walk past the end of a
+                                    // short frontage (a corner, a setback), so
+                                    // confirm the SAME unit's wall is still
+                                    // straight ahead before trusting the spot
+                                    // — same check `a_pylon_never_stands_on_
+                                    // the_building_it_advertises` makes.
+                                    if sign_cell.height == 0
+                                        && sign_cell.surface != surface::ROADWAY
+                                    {
+                                        if let Some((wx, wz, wc)) =
+                                            self.wall_inward(px, pz, sx, sz, 2, SERVE_REACH)
+                                        {
+                                            if wc.plan == b.2 {
+                                                let sh = hash3(
+                                                    px.wrapping_mul(4111),
+                                                    pz.wrapping_mul(6151),
+                                                    self.seed ^ 0x2D,
+                                                );
+                                                out.push(Placed {
+                                                    x: px as f32 + 0.5
+                                                        + ((sh >> 8) % 5) as f32 / 12.0
+                                                        - 0.17,
+                                                    z: pz as f32 + 0.5
+                                                        + ((sh >> 12) % 5) as f32 / 12.0
+                                                        - 0.17,
+                                                    kind: Prop::Pylon,
+                                                    height: 6.4
+                                                        + ((sh >> 16) % 5) as f32 * 0.12,
+                                                    seed: sh,
+                                                    about: (wx, wz, wc.plan),
+                                                    facing: (sx as i8, sz as i8),
+                                                });
+                                            }
+                                        }
+                                    }
+                                    (b, facing)
                                 }
                                 Prop::Pylon => {
                                     let Some((wx, wz, wc)) =
@@ -1162,6 +1218,19 @@ impl World {
                                         continue;
                                     };
                                     if wc.plan == 0 {
+                                        continue;
+                                    }
+                                    // A fast-food unit gets its pylon at the
+                                    // bay it drives through, not here — see
+                                    // the Hatch branch above — so this generic
+                                    // street-furniture pylon leaves it alone.
+                                    let room = crate::interior::ground_room(
+                                        wx.div_euclid(BLOCK),
+                                        wz.div_euclid(BLOCK),
+                                        wc.plan,
+                                        self.seed,
+                                    );
+                                    if room == crate::interior::Room::FastFood {
                                         continue;
                                     }
                                     ((wx, wz, wc.plan), (sx as i8, sz as i8))
