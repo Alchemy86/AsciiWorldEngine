@@ -118,6 +118,7 @@ fn main() {
             "--doorway" => mode = "doorway",
             "--lift" => mode = "lift",
             "--wayfind" => mode = "wayfind",
+            "--drivethru" | "--drive-through" => mode = "drivethru",
             "--tallest" => pick = "tallest",
             "--landmark" => pick = "landmark",
             "--indoors" => a.indoors = true,
@@ -195,6 +196,7 @@ fn main() {
         "doorway" => doorway(&a),
         "lift" => lift_shot(&a),
         "wayfind" => wayfind_shot(&a, pick),
+        "drivethru" => drivethru_shot(&a),
         _ => play(&a, demo, ride),
     }
 }
@@ -212,6 +214,7 @@ fn help() {
            asciicity --capture       a scripted walk -> frames on disk\n  \
            asciicity --film          record a walk: EVERY frame -> ffmpeg\n  \
            asciicity --plate-shot    near / middle / far plate evidence frames\n  \
+           asciicity --drivethru     the drive-through: hatch, bay, a car that stops\n  \
            asciicity --doorway       approach / threshold / inside / window /\n      \
              back out — evidence frames for the doors and the rooms\n  \
            asciicity --lift          landing / in the car / mid-rise, floors\n      \
@@ -2450,4 +2453,240 @@ fn bench(a: &Args) {
             }
         );
     }
+}
+
+
+/// **The drive-through, as evidence.** Next to `--doorway`, `--lift` and
+/// `--wayfind`, and there for the same reason: `--vista` and `--capture` pick
+/// their frame on the shape of the CITY, so whether a serving hatch is in view
+/// is luck.
+///
+/// It finds the nearest bay, names the business it belongs to out of the world
+/// model, stands on the far pavement looking at it, and then runs the engine
+/// with NO keys held until a car actually stops in the bay — reporting how many
+/// frames that took and which registration it was. If no car ever stops it
+/// exits non-zero, because a drive-through nothing drives through is the one
+/// outcome this feature must not have.
+fn drivethru_shot(a: &Args) {
+    let cols = a.cols.unwrap_or(180);
+    let rows = a.rows.unwrap_or(60);
+    let mut eng = make(a, cols, rows);
+    let (cx, cz) = (eng.cam.x.floor() as i32, eng.cam.z.floor() as i32);
+
+    // The nearest bay. A box scan, and that is fine: this belongs to the
+    // tools, and nothing in the frame path ever looks for one.
+    let mut best: Option<(f32, i32, i32, (i32, i32))> = None;
+    for z in cz - 200..=cz + 200 {
+        for x in cx - 200..=cx + 200 {
+            let Some(inward) = eng.world.drive_bay(x, z) else { continue };
+            let d = (x as f32 + 0.5 - eng.cam.x).hypot(z as f32 + 0.5 - eng.cam.z);
+            if best.is_none_or(|(b, ..)| d < b) {
+                best = Some((d, x, z, inward));
+            }
+        }
+    }
+    let Some((_, bx, bz, (sx, sz))) = best else {
+        eprintln!("no drive-through within 200 cells of the spawn for seed {}", a.seed);
+        std::process::exit(1);
+    };
+
+    // Who it belongs to — asked of the world model, the same way the sign on
+    // the front of the building is.
+    let mut props = Vec::new();
+    eng.world.props_near(bx as f32 + 0.5, bz as f32 + 0.5, 6.0, &mut props);
+    let hatch = props.iter().find(|p| p.kind == asciicity::world::Prop::Hatch);
+    match hatch {
+        Some(h) => {
+            let bld = asciicity::palette::building_of(
+                h.about.0,
+                h.about.1,
+                h.about.2,
+                asciicity::world::BLOCK,
+                eng.world.grain,
+            );
+            let room = asciicity::interior::ground_room(
+                h.about.0.div_euclid(asciicity::world::BLOCK),
+                h.about.1.div_euclid(asciicity::world::BLOCK),
+                h.about.2,
+                eng.world.seed,
+            );
+            eprintln!(
+                "bay at {bx},{bz} — hatch at {:.1},{:.1} serving {} {} — {}",
+                h.x,
+                h.z,
+                std::str::from_utf8(&bld.name[..bld.name_len]).unwrap_or("?"),
+                room.word(),
+                plate_note(a, &eng)
+            );
+            assert_eq!(room, asciicity::interior::Room::FastFood);
+        }
+        None => eprintln!("bay at {bx},{bz} — no hatch prop found beside it"),
+    }
+
+    // Stand across the carriageway, looking back at the hatch over the bay.
+    eng.cam.x = bx as f32 + 0.5 - sx as f32 * 5.0;
+    eng.cam.z = bz as f32 + 0.5 - sz as f32 * 5.0;
+    eng.cam.yaw = (sx as f32).atan2(-(sz as f32));
+    eng.cam.pitch = 0.0;
+    eng.cam.halt();
+    eng.step(0.0, 0, 0.0, 0.0);
+
+    let shot = |eng: &mut Engine, name: &str, what: &str| {
+        eng.render();
+        let title = format!(
+            "AsciiWorldEngine — {what} — {:.0},{:.0} yaw {:.2}",
+            eng.cam.x, eng.cam.z, eng.cam.yaw
+        );
+        let stem = write_frame(eng, &a.out, name, what);
+        eprintln!("{stem}.svg  {title}");
+    };
+    shot(&mut eng, "drive-1-empty", "the bay, empty");
+
+    // Now wait — with no keys held — for a car to pull up of its own accord.
+    //
+    // **Not necessarily at THIS bay.** A bay is used when a car happens to be
+    // in that kerb lane heading that way, which for one bay is a thing that
+    // happens every few minutes; across the live disc it is happening
+    // constantly. So the honest tool waits for a car to stop ANYWHERE, then
+    // walks the camera to whichever bay that is — rather than standing at one
+    // bay claiming the feature is broken because this one was quiet.
+    let mut waited = 0usize;
+    let mut served = None;
+    let mut stops = 0usize;
+    for i in 0..20000 {
+        eng.step(1.0 / 60.0, 0, 0.0, 0.0);
+        let hit = eng.pop.vehs.iter().find(|v| v.hold > 0.0).map(|v| (v.x, v.z, v.plate));
+        if let Some((vx, vz, key)) = hit {
+            stops += 1;
+            if served.is_none() {
+                waited = i;
+                served = Some((vx, vz, eng.pop.plates.get(key).as_str().to_string()));
+                break;
+            }
+        }
+    }
+    let Some((vx, vz, reg)) = served else {
+        eprintln!("20000 frames and no car ever stopped in a bay — the drive-through is dead");
+        std::process::exit(1);
+    };
+    let _ = stops;
+    eprintln!(
+        "a car stopped in a bay after {waited} frames ({:.1}s) at {vx:.1},{vz:.1}, plate \"{}\"",
+        waited as f32 / 60.0,
+        reg.trim()
+    );
+    // Stand across the road from the bay that car is actually in.
+    let Some((sx2, sz2)) = eng.world.drive_bay(vx.floor() as i32, vz.floor() as i32) else {
+        eprintln!("the stopped car is not over a bay — that should be impossible");
+        std::process::exit(1);
+    };
+    eng.cam.x = vx - sx2 as f32 * 5.0;
+    eng.cam.z = vz - sz2 as f32 * 5.0;
+    eng.cam.yaw = (sx2 as f32).atan2(-(sz2 as f32));
+    eng.cam.halt();
+    eng.step(0.0, 0, 0.0, 0.0);
+    let (sx, sz) = (sx2, sz2);
+    let (bx, bz) = (vx.floor() as i32, vz.floor() as i32);
+    shot(&mut eng, "drive-2-served", "a car at the hatch");
+
+    // And a wider view of the same corner, from up the street, so the pylon
+    // and the shopfront are both in frame.
+    eng.cam.x = bx as f32 + 0.5 - sx as f32 * 5.0 + sz as f32 * 16.0;
+    eng.cam.z = bz as f32 + 0.5 - sz as f32 * 5.0 + sx as f32 * 16.0;
+    eng.cam.yaw = (-sz as f32).atan2(-(sx as f32));
+    eng.cam.halt();
+    eng.step(0.0, 0, 0.0, 0.0);
+    shot(&mut eng, "drive-3-street", "the street it stands on");
+
+    // And a pylon, framed as a pylon. `--vista` and the two shots above pick
+    // their camera off the road, so whether a sign is readable in them is luck;
+    // this stands the right distance back from one and reads it.
+    let mut near = Vec::new();
+    eng.world.props_near(eng.cam.x, eng.cam.z, 90.0, &mut near);
+    let Some(py) = near
+        .iter()
+        .filter(|p| p.kind == asciicity::world::Prop::Pylon)
+        .min_by(|a, b| {
+            let d = |p: &&asciicity::world::Placed| (p.x - eng.cam.x).hypot(p.z - eng.cam.z);
+            d(a).total_cmp(&d(b))
+        })
+        .copied()
+    else {
+        eprintln!("no pylon within 90 cells — nothing to read");
+        return;
+    };
+    let bld = asciicity::palette::building_of(
+        py.about.0,
+        py.about.1,
+        py.about.2,
+        asciicity::world::BLOCK,
+        eng.world.grain,
+    );
+    let room = asciicity::interior::ground_room(
+        py.about.0.div_euclid(asciicity::world::BLOCK),
+        py.about.1.div_euclid(asciicity::world::BLOCK),
+        py.about.2,
+        eng.world.seed,
+    );
+    eprintln!(
+        "pylon at {:.1},{:.1} advertising {} {} — {:?}",
+        py.x,
+        py.z,
+        std::str::from_utf8(&bld.name[..bld.name_len]).unwrap_or("?"),
+        room.word(),
+        room.offers()
+    );
+    // Stand back along the sign's own outward normal — the way a sign is meant
+    // to be read — far enough that the whole board is in frame.
+    // **Where a sign is actually readable from**, scored rather than assumed —
+    // `--plate-shot`'s method, for `--plate-shot`'s reason. Straight back from
+    // a pylon is very often the block opposite; a step to either side of that
+    // is very often a lamppost. So stand in each of a handful of places, render
+    // the frame, and count how many of the sign's OWN words survived to the
+    // grid. The board degrades to a blank board wherever something is in front
+    // of it, so this is a real measurement of legibility and not of intent.
+    let words: Vec<String> = std::iter::once(
+        std::str::from_utf8(&bld.name[..bld.name_len]).unwrap_or("").to_string(),
+    )
+    .chain(std::iter::once(room.word().to_string()))
+    .chain(room.offers().iter().map(|w| w.to_string()))
+    .collect();
+    let mut best = (0usize, 9.0f32, 0.0f32);
+    for d in [7.0f32, 9.0, 11.0, 13.0, 16.0] {
+        for side in [0.0f32, -1.6, 1.6] {
+            let (nx, nz) = (py.facing.0 as f32, py.facing.1 as f32);
+            let (x, z) = (py.x - nx * d - nz * side, py.z - nz * d + nx * side);
+            if eng.world.city_cell(x.floor() as i32, z.floor() as i32).height != 0 {
+                continue;
+            }
+            eng.cam.x = x;
+            eng.cam.z = z;
+            eng.cam.yaw = (nx).atan2(-nz);
+            // Tilt up to the middle of the board: a sign read from a standing
+            // eye at nine units is most of a screen above the horizon, and a
+            // shot that does not look at it is a picture of the pavement.
+            eng.cam.pitch = ((py.height - 1.8 - eng.cam.eye) / d).atan();
+            eng.cam.halt();
+            eng.step(0.0, 0, 0.0, 0.0);
+            eng.render();
+            let text = String::from_utf8_lossy(&eng.grid.ch).to_string();
+            let n = words.iter().filter(|w| text.contains(&w.replace(' ', ":"))).count();
+            if n > best.0 {
+                best = (n, d, side);
+            }
+        }
+    }
+    let (found, back, side) = best;
+    let (nx, nz) = (py.facing.0 as f32, py.facing.1 as f32);
+    eng.cam.x = py.x - nx * back - nz * side;
+    eng.cam.z = py.z - nz * back + nx * side;
+    eng.cam.yaw = nx.atan2(-nz);
+    eng.cam.pitch = ((py.height - 1.8 - eng.cam.eye) / back).atan();
+    eng.cam.halt();
+    eng.step(0.0, 0, 0.0, 0.0);
+    eprintln!(
+        "  read from {back} units back, {side} to the side — {found} of {} lines legible",
+        words.len()
+    );
+    shot(&mut eng, "drive-4-pylon", "a pylon, read from the pavement");
 }

@@ -30,7 +30,17 @@ pub struct Actor {
     /// Holding the key rather than an index means swapping the list in does not
     /// need every vehicle re-rolled.
     pub plate: u16,
+    /// **Why a car is standing still.** Positive is a countdown at a
+    /// drive-through hatch; negative means it has been served and must clear
+    /// the bay before it can queue again; zero is a car going about its
+    /// business. One `f32` and no state machine, because stopping for a beat is
+    /// not a behaviour tree — see `World::drive_bay` for where a bay IS.
+    pub hold: f32,
 }
+
+/// How long a car stands at the hatch. Long enough to read as a transaction
+/// from the pavement, short enough that the lane is not a car park.
+const SERVE_TIME: f32 = 2.6;
 
 pub struct Population {
     pub peds: Vec<Actor>,
@@ -101,7 +111,17 @@ impl Population {
                 (10 + self.rng.below(60)) as u16
             };
             let plate = self.rng.next_u32() as u16;
-            return Actor { x, z, hx, hz, speed, phase: self.rng.f32() * 6.28, hue, plate };
+            return Actor {
+                x,
+                z,
+                hx,
+                hz,
+                speed,
+                phase: self.rng.f32() * 6.28,
+                hue,
+                plate,
+                hold: 0.0,
+            };
         }
         // Nowhere suitable nearby: park it far off, it will be recycled next tick.
         Actor { x: cx + 1e4, z: cz + 1e4, ..Default::default() }
@@ -117,9 +137,29 @@ impl Population {
     pub fn update(&mut self, world: &World, dt: f32, cx: f32, cz: f32) {
         for i in 0..self.vehs.len() {
             let mut a = self.vehs[i];
-            a.x += a.hx * a.speed * dt;
-            a.z += a.hz * a.speed * dt;
-            a.phase += dt * 4.0;
+            // **The drive-through, and the whole of it.** A car that is over a
+            // bay pulls up; one that has been served drives off and cannot
+            // queue again until it is clear of the bay. Nothing is stored and
+            // nothing is pathed — the bay is a pure function of the road, so
+            // the car, the hatch on the pavement and the markings under the
+            // wheels all agree without any of them being told.
+            let on_bay = world.drive_bay(a.x.floor() as i32, a.z.floor() as i32).is_some();
+            if !on_bay && a.hold < 0.0 {
+                a.hold = 0.0;
+            }
+            if on_bay && a.hold == 0.0 {
+                a.hold = SERVE_TIME;
+            }
+            if a.hold > 0.0 {
+                a.hold -= dt;
+                if a.hold <= 0.0 {
+                    a.hold = -1.0;
+                }
+            } else {
+                a.x += a.hx * a.speed * dt;
+                a.z += a.hz * a.speed * dt;
+                a.phase += dt * 4.0;
+            }
             let c = world.cell(a.x.floor() as i32, a.z.floor() as i32);
             let off = (a.x - cx).hypot(a.z - cz);
             if off > LIVE_RADIUS || c.height != 0 || c.surface != surface::ROADWAY {

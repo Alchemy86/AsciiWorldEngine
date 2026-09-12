@@ -460,6 +460,76 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `to_exit` floods toward the thing that really is the way out, and there is no
   EXIT sign up there to hang over a blank wall.
 
+## The drive-through, the pylons, and the rest of the furniture
+
+- **Fourteen room families, and nothing indexes the table by a literal.**
+  `interior::STYLES` is `[Style; 14]` and both readers take `STYLES.len()`, so
+  adding a family is adding a row. Adding one is NOT free of consequences: a
+  building's ground-floor family sets its ceiling height, which sets its
+  storey table, which is what `walk_into_a_lift` sorts on — so
+  `a_floor_number_on_the_shaft_wall_reads_left_to_right_in_every_orientation`
+  had to have its four hand-picked seeds re-found. Re-find them, do not weaken
+  the test; the search is a `#[ignore]`d loop over seeds printing `(room.ix,
+  room.iz)`.
+- **`Room::offers` is the pylon's three lines and it is keyed on the TRADE.**
+  Same rule that deleted `SIGN_TYPES`: one table saying what a building is. A
+  pylon outside a clinic cannot advertise cold beer because the only thing it
+  can ask is the room that is actually behind the door.
+- **A drive-through is three bits of code that never speak and cannot
+  disagree.** The paint on the road, the hatch on the pavement and the car that
+  stops all call `World::drive_bay`, a pure function of the road. There is no
+  pathing, no state machine and nothing stored — one `f32` on `Actor`
+  (`hold`): positive is a countdown at the hatch, negative is "served, clear
+  the bay before queueing again", zero is a car going about its business. What
+  it deliberately is NOT: the car never leaves the carriageway, turns, queues
+  behind another car, or wraps round the building. All of that is pathing and
+  this engine has none. That is the follow-up, not an oversight.
+- **`HATCH_REACH` is a performance constant wearing a design constant's
+  clothes.** Every other prop is generated at a spacing and is nearly free; a
+  hatch is a stride-one scan of every kerb cell in range, because there is one
+  wherever a fast-food counter is and nowhere else. At the full 58-unit prop
+  range that scan measured **0.038 ms of a 0.60 ms frame** — more than the rest
+  of the pass put together. 34 units took it to 0.016. Adding a fast-reject
+  probe inside `serves_fastfood` was tried and measured at NOTHING: the common
+  rejection was already one or two `city_cell` calls, so the gate added one
+  rather than saving one. Cut the candidate count, not the per-candidate cost.
+- **The props list is sorted far-to-near before drawing**, which it never used
+  to be. It did not show while furniture was posts and canopies; a pylon is a
+  sign with WRITING on it, and one leaf of a tree behind it landing mid-word is
+  a different offer. The sort measured at nothing.
+- **A pylon's writing is held over to after the population, `put_plate`'d, and
+  set nearest-first — three separate rules and all three were put there by an
+  observed failure.** Held over, because a pedestrian who walks in front of
+  `TOKENS INSIDE` after it is drawn leaves `TOKENS INSID`. `put_plate`, so the
+  rain will not put a drop through a letter. Nearest-first (the OPPOSITE of the
+  boards, which are solid and go far-to-near) because two pylons a street apart
+  put their names in overlapping columns, and whichever went down second left
+  the other reading `ORKS` and `CIN`. All three are the registration plate's
+  rules, reused verbatim.
+- **A fascia truncated by a prop is PRE-EXISTING and accepted** — the baseline
+  build shows `LOB` for `LOBBY` on a street with a lamppost in the way, and
+  `fascias`' own comment says why. Do not "fix" it while chasing a pylon bug;
+  measure the baseline first.
+- **`--drivethru` is the evidence tool**, next to `--doorway`, `--lift`,
+  `--wayfind` and `--plate-shot`. It waits, with no keys held, for a car to
+  stop of its own accord ANYWHERE and then walks the camera to that bay —
+  standing at one chosen bay and declaring the feature dead because that one
+  was quiet is the mistake it was written to avoid (one bay is used every few
+  minutes; across the live disc it is constant). Its pylon shot SCORES camera
+  positions on how many of the sign's own words survived to the grid, which is
+  `--plate-shot`'s method and the only honest legibility check.
+- **The shape of a pylon is a rendering requirement.** `PYLON_HALF_W` and
+  `PYLON_PANEL_H` were arrived at by shooting `--drivethru` and looking, the
+  way `lift::CORE_W` was. The dark panel is a THIRD of the board, not three
+  rows of it: at three rows a close sign is a field of brand colour with a
+  caption lost at the bottom.
+- **Seats in a park are the one prop placed by AREA.** `World::park_seats`, a
+  lattice inside a park quadrant. Everything else walks street lines because a
+  street has two sides and a kerb; a park has neither.
+- **Where the frames come from.** `docs/drive-through.png` is `--drivethru
+  --seed 90210` at 180x60, the two named frames through headless Chrome at
+  `1980,1090`, then the label/append method under "Evidence frames".
+
 ## Registration plates, and the grid's background plane
 
 - **A plate is drawn out of CHARACTERS and paints nothing.** Body and edge are
@@ -627,6 +697,12 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   frames had to be regenerated after the building profiles landed. If you change
   `world.rs` or `render.rs`, re-shoot every picture in `docs/` that shows the
   thing you changed.
+- **Staler still as of the content work**: four new room families mean new
+  trade words on fascias (`NOODLES`, `CLINIC`, `ARCADE`, `GARAGE`), and a
+  street now carries benches, booths, bus stops and pylon signs. No world
+  GEOMETRY changed — heights, plots and silhouettes are untouched — so a
+  skyline shot is only as stale as it already was, but every street-level
+  picture is.
 - **Stale as of the wayfinding work**: anything showing a skyline or a
   storefront predates the landmark silhouette and the fascia names —
   `docs/silhouettes.png`, `docs/variety.png`, `docs/frames/city-street.png`,

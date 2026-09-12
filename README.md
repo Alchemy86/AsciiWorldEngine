@@ -30,10 +30,11 @@ as you move through it, running faster than your monitor can show you.
 |  |  |
 |---|---|
 | **Native Rust** | one crate, and exactly one dependency (`libc`, for termios). No browser, no runtime, no node, no wasm on the default path |
-| **0.584 ms a frame** | 180×60, measured on the current build — a 1,710 fps ceiling. [What a frame costs](docs/performance.md) |
+| **0.602 ms a frame** | 180×60, measured on the current build — a 1,660 fps ceiling. [What a frame costs](docs/performance.md) |
 | **3.2 MB resident** | there is no world grid; every cell is a pure function of its coordinate, so the city is **unbounded** and walking further costs nothing |
-| **The world** | avenues and junctions, towers with six different silhouettes, lit storefronts, traffic carrying **readable registration plates**, pedestrians, lampposts, street trees, rain you can turn on, and a star field behind it all |
-| **The insides** | every street-facing building has a door. Walk through it and you are in a real room — furniture, fixtures, and a glazed wall you can see the actual city through |
+| **The world** | avenues and junctions, towers with six different silhouettes, lit storefronts, traffic carrying **readable registration plates**, pedestrians, lampposts, street trees, benches, phone booths, bus stops, branded pylon signs, rain you can turn on, and a star field behind it all |
+| **The insides** | every street-facing building has a door. Walk through it and you are in a real room — one of fourteen trades, with its own furniture, fixtures, and a glazed wall you can see the actual city through |
+| **A drive-through** | a fast-food unit on an avenue has a marked bay in the kerb lane, a serving hatch with somebody in it, and traffic that actually pulls up, waits, and drives on |
 | **The lift** | a tall building has a glass car in a shaft. Press the panel and it takes you up — the floors sliding past on one side, the street falling away on the other |
 | **Runs anywhere a terminal does** | 24-bit ANSI; it sizes itself to your window |
 
@@ -101,6 +102,7 @@ Every one of these is a real frame out of the engine, same seed, same city.
 ./play --lift --out shots                     # into the lift, up it, and out on to a floor
 ./play --ride                                 # load straight into a glass lift and just look
 ./play --wayfind --landmark --out shots       # find a lift building, and walk to it
+./play --drivethru --out shots                # the drive-through: hatch, bay, a car that stops
 ./play --film --weather rain --out frames     # every tick, ready for ffmpeg
 ./play --bench                                # per-frame cost: sim / cast / render / paint
 ```
@@ -130,7 +132,7 @@ Every one of these is a real frame out of the engine, same seed, same city.
 | [A glass lift](docs/lift.md) | which buildings get one, the panel, and the floors going past |
 | [Finding your way](docs/wayfinding.md) | names on facades, the seventh silhouette, and the `N` pointer |
 | [Registration plates](docs/registration-plates.md) | drawn out of characters, sized to the registration, honest at distance — the idea came from [regtransfers.co.uk](https://www.regtransfers.co.uk/) |
-| [Weather and what is on the pavement](docs/weather-and-streets.md) | rain, stars, lamps, trees |
+| [Weather and what is on the pavement](docs/weather-and-streets.md) | rain, the drive-through, pylon signs, stars, lamps, trees |
 | [Recording a film](docs/film.md) | `--film`, the script format, the ffmpeg pipeline |
 | [The city walking itself](docs/self-playing.md) | `--demo`, and how it differs from a recording |
 | [Holding a key down](docs/terminal-input.md) | what a terminal can and cannot tell you |

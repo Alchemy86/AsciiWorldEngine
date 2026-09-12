@@ -130,6 +130,12 @@ pub enum Room {
     Plant,
     Bar,
     Archive,
+    /// A counter you eat at, and the one family with a DRIVE-THROUGH on the
+    /// street outside it. See `World::drive_bay`.
+    FastFood,
+    Clinic,
+    Arcade,
+    Garage,
 }
 
 impl Room {
@@ -145,9 +151,48 @@ impl Room {
             Room::Plant => "PLANT",
             Room::Bar => "BAR",
             Room::Archive => "ARCHIVE",
+            Room::FastFood => "NOODLES",
+            Room::Clinic => "CLINIC",
+            Room::Arcade => "ARCADE",
+            Room::Garage => "GARAGE",
+        }
+    }
+
+    /// **What a pylon sign says this place sells.** Three short lines, the way
+    /// a real roadside sign carries three.
+    ///
+    /// Keyed on the TRADE and nowhere else, for the reason `SIGN_TYPES` was
+    /// deleted: a second table of what a building offers is a second table
+    /// saying what one building is, and it will disagree. A pylon outside a
+    /// clinic cannot advertise cold beer, because the only thing it can ask is
+    /// the room that is actually behind the door.
+    ///
+    /// Nothing here is longer than `PYLON_LINE_MAX` characters — a line that
+    /// does not fit is not set at all (the fascia's rule), and half a line
+    /// says something the shop did not.
+    pub fn offers(self) -> [&'static str; 3] {
+        match self {
+            Room::Lobby => ["RECEPTION", "MAIL ROOM", "24 HR DESK"],
+            Room::Offices => ["SUITES TO LET", "MEETING ROOMS", "FIBRE UPLINK"],
+            Room::Market => ["FRESH PRODUCE", "HOT COUNTER", "OPEN LATE"],
+            Room::Workshop => ["REPAIRS", "PARTS COUNTER", "CUSTOM WORK"],
+            Room::Gallery => ["NEW SHOWING", "PRINT SALES", "FREE ENTRY"],
+            Room::Concourse => ["TICKET HALL", "LEFT LUGGAGE", "ALL PLATFORMS"],
+            Room::Residence => ["UNITS TO LET", "RESIDENTS ONLY", "CONCIERGE"],
+            Room::Plant => ["NO PUBLIC ENTRY", "HIGH VOLTAGE", "SITE OFFICE"],
+            Room::Bar => ["COLD BEER", "LIVE SETS", "OPEN TIL 4"],
+            Room::Archive => ["PUBLIC RECORDS", "READING ROOM", "COPY DESK"],
+            Room::FastFood => ["DRIVE THROUGH", "HOT NOODLES", "OPEN 24 HRS"],
+            Room::Clinic => ["WALK IN CARE", "PRESCRIPTIONS", "OPEN 24 HRS"],
+            Room::Arcade => ["200 CABINETS", "TOKENS INSIDE", "OPEN TIL 4"],
+            Room::Garage => ["MOT & SERVICE", "TYRES FITTED", "FUEL & AIR"],
         }
     }
 }
+
+/// The longest line a pylon's lower panel may carry. A sign is only as wide as
+/// it is, and the panel is sized from this.
+pub const PYLON_LINE_MAX: usize = 15;
 
 /// How the floor plan is organised. Three shapes cover every family; which one
 /// a family takes is most of why a workshop does not feel like a bar.
@@ -205,10 +250,17 @@ pub struct Style {
     density: f32,
 }
 
-/// The ten families. The mix is the design: three of them are nearly empty and
+/// The families. The mix is the design: three of them are nearly empty and
 /// tall, three are dense and low, and the rest sit between — so walking into
 /// two buildings in a row does not give you the same room at two sizes.
-static STYLES: [Style; 10] = [
+///
+/// The four after `Archive` were added to fill what a *walkable* city was
+/// missing rather than to lengthen the list: somewhere to eat, somewhere to be
+/// treated, somewhere to play, and — on a street with traffic on it every
+/// frame and no vehicle trade anywhere — somewhere to have a car seen to.
+/// Nothing indexes this table by a literal count; `ground_room` and `fabric`
+/// both take `STYLES.len()`, so adding a family is adding a row.
+static STYLES: [Style; 14] = [
     Style {
         room: Room::Lobby,
         plan: Plan::Open,
@@ -378,6 +430,80 @@ static STYLES: [Style; 10] = [
         spots: &[fit::CRATE, fit::RACK, fit::MACHINE],
         columns: false,
         density: 0.34,
+    },
+    Style {
+        // Lit like a lit thing: the brightest ambient and the most glass of
+        // any family, because a fast-food counter at night is the one shopfront
+        // on a dark street you can read from the far pavement.
+        room: Room::FastFood,
+        plan: Plan::Open,
+        ceil: (3.0, 3.8),
+        floor_mat: floor::TILE,
+        wall_hue: 18.0,
+        wall_sat: 30.0,
+        light_hue: 34.0,
+        light_sat: 90.0,
+        ambient: 1.00,
+        fall: 30.0,
+        glazing: 0.90,
+        run: fit::COUNTER,
+        spots: &[fit::COUNTER, fit::CRATE, fit::RAIL],
+        columns: false,
+        density: 0.14,
+    },
+    Style {
+        room: Room::Clinic,
+        plan: Plan::Bands,
+        ceil: (3.2, 4.0),
+        floor_mat: floor::TILE,
+        wall_hue: 178.0,
+        wall_sat: 10.0,
+        light_hue: 186.0,
+        light_sat: 26.0,
+        ambient: 1.00,
+        fall: 36.0,
+        glazing: 0.55,
+        run: fit::PARTITION,
+        spots: &[fit::DESK, fit::RACK, fit::PLANTER],
+        columns: false,
+        density: 0.22,
+    },
+    Style {
+        // The other end of the same street: dense, low, dark between the
+        // cabinets, and the one room whose light is more saturated than its
+        // walls by a long way.
+        room: Room::Arcade,
+        plan: Plan::Bands,
+        ceil: (3.4, 4.6),
+        floor_mat: floor::CARPET,
+        wall_hue: 282.0,
+        wall_sat: 30.0,
+        light_hue: 292.0,
+        light_sat: 88.0,
+        ambient: 0.80,
+        fall: 13.0,
+        glazing: 0.50,
+        run: fit::MACHINE,
+        spots: &[fit::MACHINE, fit::CRATE, fit::RAIL],
+        columns: false,
+        density: 0.40,
+    },
+    Style {
+        room: Room::Garage,
+        plan: Plan::Scatter,
+        ceil: (4.4, 6.0),
+        floor_mat: floor::POURED,
+        wall_hue: 210.0,
+        wall_sat: 14.0,
+        light_hue: 48.0,
+        light_sat: 40.0,
+        ambient: 0.83,
+        fall: 24.0,
+        glazing: 0.30,
+        run: fit::MACHINE,
+        spots: &[fit::CRATE, fit::TANK, fit::MACHINE],
+        columns: true,
+        density: 0.26,
     },
 ];
 
@@ -700,7 +826,7 @@ fn core_beside(across: i32, off: i32, ix: i32) -> Option<Core> {
 #[inline]
 pub fn ground_room(bx: i32, bz: i32, plan: u16, seed: i32) -> Room {
     let key = hash3(bx.wrapping_mul(6301) + plan as i32, bz.wrapping_mul(4507), seed ^ 0x1F7);
-    STYLES[(key % 10) as usize].room
+    STYLES[(key as usize) % STYLES.len()].room
 }
 
 #[inline]
@@ -720,7 +846,7 @@ pub fn fabric(site: Site, floor_no: i32) -> Fabric {
     );
     let (r, across, deep, ceil_t, off) = frontage(bx, bz, site.plan, site.seed);
 
-    let st = &STYLES[(key % 10) as usize];
+    let st = &STYLES[(key as usize) % STYLES.len()];
     let raw_ceiling = st.ceil.0 + (st.ceil.1 - st.ceil.0) * ceil_t;
     // The ground floor keeps whatever its family gives it — a lobby is double
     // height and should be. A stack of double-height storeys is not a building,

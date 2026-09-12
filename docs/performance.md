@@ -16,21 +16,48 @@ can be attributed to a stage rather than to the frame as a whole. Terminal
 
 | stage | mean (ms) | p50 | p95 |
 |---|---|---|---|
-| sim | 0.009 | 0.009 | 0.010 |
-| cast | 0.077 | 0.085 | 0.133 |
-| render | 0.362 | 0.360 | 0.406 |
-| paint | 0.136 | 0.136 | 0.153 |
-| **total** | **0.584** | | |
+| sim | 0.015 | 0.015 | 0.017 |
+| cast | 0.075 | 0.080 | 0.131 |
+| render | 0.386 | 0.386 | 0.433 |
+| paint | 0.127 | 0.130 | 0.147 |
+| **total** | **0.602** | | |
 
-That is a **1,710 fps ceiling** at 10,800 cells, with 223 visible cells kept
-per frame by the occlusion cull — the same 223 as before the lift, because the
-street is the same street. Peak resident memory over the run was **3.2 MB** —
-there is no world grid to hold, so walking further costs nothing.
+That is a **1,660 fps ceiling** at 10,800 cells, with 207 visible cells kept
+per frame by the occlusion cull — the same 207 as before, because the street is
+the same street. Peak resident memory over the run was **3.2 MB** — there is no
+world grid to hold, so walking further costs nothing.
 
-Indoors the same run gives **0.544 ms/frame**: a room cell is an array index
+Indoors the same run gives **0.481 ms/frame**: a room cell is an array index
 where a city cell is five hashes, and a wall two paces away ends a raycast
 column on its first step. In a moving lift it is **0.611** — see the lift
 below.
+
+### What the drive-through, the pylons and the rest of the furniture cost
+
+Eight interleaved pairs of 400 frames, 180×60, load average under 1.0, the
+build before this work against the build with it:
+
+| | sim | cast | render | paint | total |
+|---|---|---|---|---|---|
+| before benches, booths, stops, hatches and pylons | 0.009 | 0.078 | 0.360 | 0.131 | 0.577 |
+| with them | 0.014 | 0.079 | 0.383 | 0.126 | 0.603 |
+
+**+0.025 ms/frame, +4.4%.** It is worth saying where it went, because the
+split is not where you would guess:
+
+* **sim +0.005.** `World::drive_bay`, asked of every vehicle every frame. Only
+  a car in a kerb lane pays for more than three integer tests, and that is
+  about a third of the traffic; each one costs a handful of `city_cell` calls.
+* **render +0.023**, and **most of it is one thing**. Everything else on the
+  pavement is *generated* — four known cross-offsets at a known spacing — so
+  its candidates are nearly free. A serving hatch cannot be: there is one
+  wherever a fast-food counter is and nowhere else, so every cell of kerb in
+  range is a candidate and each costs a `city_cell`. At the full 58-unit prop
+  range that scan measured **0.038 ms on its own**, which is more than the rest
+  of the pass put together. Giving it its own shorter reach (`HATCH_REACH`, 34
+  units — a kiosk at 58 units is two characters wide) took it to 0.016. Sorting
+  the props far-to-near, which the pylons' writing needs, measured at nothing.
+* Drawing the five new prop kinds, boards and all, is the remaining 0.007.
 
 ## Read absolute numbers with suspicion
 

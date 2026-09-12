@@ -790,6 +790,24 @@ pub enum Prop {
     Tree,
     /// A low planted box on the forecourt.
     Planter,
+    /// A seat. On the forecourt against the building line, and on a lattice
+    /// inside a park quadrant — the only furniture that is placed by area
+    /// rather than along a street line, because a park is not a street.
+    Bench,
+    /// A phone booth: a lit box you can stand in.
+    Booth,
+    /// A bus stop: a flag on a post with a shelter behind it.
+    Stop,
+    /// **The serving hatch of a drive-through**, standing at the kerb with a
+    /// bay marked out in the lane beside it. Only ever placed opposite the
+    /// entrance of a `Room::FastFood` unit — see `World::drive_bay`.
+    Hatch,
+    /// **A branded pylon sign**: a coloured header naming a real business
+    /// behind it, an arrow that points at that business, and a dark panel of
+    /// what it sells. The name and trade come from the same two functions the
+    /// building's own fascia uses, so a pylon cannot advertise something that
+    /// is not there.
+    Pylon,
 }
 
 /// One placed piece of street furniture, in world coordinates.
@@ -803,6 +821,15 @@ pub struct Placed {
     pub height: f32,
     /// Per-instance hash, for whatever the renderer wants to vary.
     pub seed: u32,
+    /// **The building this thing is about**, as `(cell x, cell z, plan)`, or a
+    /// zero plan when it is about nothing. A pylon and a serving hatch both
+    /// name a real business, and they name it the way a fascia does: by
+    /// handing this cell to `palette::building_of` and `interior::ground_room`
+    /// rather than by carrying a second copy of the answer.
+    pub about: (i32, i32, u16),
+    /// Which way the thing faces, as a unit cell step. A hatch faces its bay,
+    /// a pylon's arrow points at `about`.
+    pub facing: (i8, i8),
 }
 
 /// Cross-street offsets things stand at. The avenue is 16 cells wide: pavement
@@ -812,14 +839,164 @@ pub struct Placed {
 const LAMP_CROSS: [i32; 2] = [3, 12];
 const TREE_CROSS: [i32; 2] = [1, 14];
 const PLANTER_CROSS: [i32; 2] = [2, 13];
+/// A seat sits back against the building line, out of the walking line.
+const BENCH_CROSS: [i32; 2] = [2, 13];
+const BOOTH_CROSS: [i32; 2] = [3, 12];
+/// A bus stop and a serving hatch both stand AT the kerb, because both are
+/// served from the carriageway.
+const KERB_CROSS: [i32; 2] = [4, 11];
+/// A pylon stands clear of the walking line and clear of the lamps.
+const PYLON_CROSS: [i32; 2] = [1, 14];
 /// Spacing along the street, in cells. Deliberately coprime with each other and
 /// with the 32-cell block, so lamps, trees and planters do not line up into
 /// rows of three.
 const LAMP_EVERY: i32 = 9;
 const TREE_EVERY: i32 = 7;
 const PLANTER_EVERY: i32 = 13;
+const BENCH_EVERY: i32 = 11;
+const BOOTH_EVERY: i32 = 17;
+const STOP_EVERY: i32 = 29;
+const PYLON_EVERY: i32 = 31;
+
+/// The two kerb lanes of an avenue. A drive-through bay is always in one of
+/// them, because that is the lane a car can leave the flow in.
+const KERB_LANE: [i32; 2] = [5, 10];
+/// How far in from the kerb lane an entrance may be and still be served from
+/// it: five cells of forecourt, plus the outer ring or two of the plot.
+const SERVE_REACH: i32 = 9;
+/// Seats in a park sit on this lattice inside the quadrant.
+const PARK_SEAT_EVERY: i32 = 5;
+/// **How far out the kerb is scanned for a serving hatch.**
+///
+/// Every other kind of furniture is *generated* — four known cross-offsets at a
+/// known spacing — so its candidates are nearly free. A hatch cannot be: there
+/// is one wherever a fast-food counter is and nowhere else, so every cell of
+/// kerb in range is a candidate and each one costs a `city_cell`. Measured at
+/// the full 58-unit prop range that scan is **0.038 ms of a 0.64 ms frame**,
+/// which is more than everything else in this pass put together. A kiosk at 58
+/// units is two characters wide; at 34 it is still a kiosk, and the scan is a
+/// linear walk so the cost falls with the reach. The bay a car stops on is
+/// unaffected — `drive_bay` is a pure function of the road and knows nothing
+/// about how far away anybody is standing.
+const HATCH_REACH: f32 = 34.0;
 
 impl World {
+    /// **Is this block's built quadrant a park?** The same civic hash
+    /// `city_cell` asks, exposed so the furniture pass can seat a park without
+    /// scanning the ground for greenery. One hash; see `city_cell`.
+    #[inline]
+    pub fn is_park(&self, bx: i32, bz: i32) -> bool {
+        hash3(bx.wrapping_mul(7919), bz.wrapping_mul(6421), self.seed) % 100 < 4
+    }
+
+    /// The first SOLID cell inward from a point on the avenue, looking `k0..=k1`
+    /// cells in. Everything that wants to know what building a piece of street
+    /// furniture stands in front of asks this, and it is the only walk any of
+    /// them do: the avenue is a known width, so the building line is at a known
+    /// distance and there is nothing to search for.
+    #[inline]
+    fn wall_inward(
+        &self,
+        gx: i32,
+        gz: i32,
+        sx: i32,
+        sz: i32,
+        k0: i32,
+        k1: i32,
+    ) -> Option<(i32, i32, Cell)> {
+        for k in k0..=k1 {
+            let (x, z) = (gx + sx * k, gz + sz * k);
+            let c = self.city_cell(x, z);
+            if c.height > 0 {
+                return Some((x, z, c));
+            }
+        }
+        None
+    }
+
+    /// Which way the building line is from a cross-offset, as a unit step on
+    /// the axis ACROSS the avenue. The avenue is 16 cells wide with the
+    /// carriageway in the middle, so the near building line is simply whichever
+    /// side of the middle you are on.
+    #[inline]
+    fn inward_of(along_x: bool, cross: i32) -> (i32, i32) {
+        let d = if cross <= 7 { -1 } else { 1 };
+        if along_x {
+            (0, d)
+        } else {
+            (d, 0)
+        }
+    }
+
+    /// **Is this cell of carriageway a drive-through bay?**
+    ///
+    /// A bay is a run of the kerb lane — the one lane a car can leave the flow
+    /// in — directly opposite the entrance of a `Room::FastFood` unit. It is a
+    /// pure function of coordinate like everything else here, so a car, the
+    /// serving hatch on the pavement and the markings painted on the road all
+    /// agree about where it is without any of them being told.
+    ///
+    /// Returns the inward step toward the unit being served. The promise runs
+    /// one way and exactly: a bay is always in front of a fast-food counter.
+    pub fn drive_bay(&self, gx: i32, gz: i32) -> Option<(i32, i32)> {
+        let ox = gx.rem_euclid(BLOCK);
+        let oz = gz.rem_euclid(BLOCK);
+        // Never in a junction: a cross offset only means what it says on a
+        // plain strip, and a car crossing a junction is not queuing for chips.
+        if ox >= BLOCK_BUILT && oz >= BLOCK_BUILT {
+            return None;
+        }
+        let along_x = oz >= BLOCK_BUILT;
+        if !along_x && ox < BLOCK_BUILT {
+            return None;
+        }
+        let cross = if along_x { oz - BLOCK_BUILT } else { ox - BLOCK_BUILT };
+        if cross != KERB_LANE[0] && cross != KERB_LANE[1] {
+            return None;
+        }
+        let (sx, sz) = Self::inward_of(along_x, cross);
+        // A doorway is one or two cells wide, so the bay is the run of lane
+        // opposite the whole of it and a cell either side. A car that stopped
+        // on exactly one cell of road would be a car that mostly did not stop.
+        for d in -1..=1 {
+            let (x, z) = if along_x { (gx + d, gz) } else { (gx, gz + d) };
+            if self.serves_fastfood(x, z, sx, sz).is_some() {
+                return Some((sx, sz));
+            }
+        }
+        None
+    }
+
+    /// The fast-food unit served from this cell of kerb lane, as
+    /// `(cell x, cell z, plan)`.
+    ///
+    /// The walk starts at six cells in because that is where the building line
+    /// is from a kerb lane — five of forecourt pavement, then the quadrant —
+    /// and stops at the first solid cell, so the common answer ("that is
+    /// somebody's wall") costs one or two `city_cell` calls and no more. The
+    /// trade word comes from `interior::ground_room`, the SAME function the
+    /// fascia over the door uses, so a hatch cannot be serving something the
+    /// shop behind it does not sell.
+    #[inline]
+    fn serves_fastfood(&self, gx: i32, gz: i32, sx: i32, sz: i32) -> Option<(i32, i32, u16)> {
+        let (x, z, c) = self.wall_inward(gx, gz, sx, sz, 6, SERVE_REACH)?;
+        // Only a door FACE is an entrance. A blank wall opposite a lane is a
+        // blank wall, however hungry the driver is.
+        if !(5..=8).contains(&c.door) || c.plan == 0 {
+            return None;
+        }
+        let room = crate::interior::ground_room(
+            x.div_euclid(BLOCK),
+            z.div_euclid(BLOCK),
+            c.plan,
+            self.seed,
+        );
+        if room != crate::interior::Room::FastFood {
+            return None;
+        }
+        Some((x, z, c.plan))
+    }
+
     /// Every piece of street furniture within `radius` of a point, appended to
     /// `out`.
     ///
@@ -832,7 +1009,6 @@ impl World {
         out.clear();
         let r = radius.ceil() as i32;
         let (ix, iz) = (cx.floor() as i32, cz.floor() as i32);
-        let r2 = radius * radius;
         // Streets running along X sit in the z strip of each block row, and
         // vice versa. Both are walked the same way, with the axes swapped.
         for along_x in [true, false] {
@@ -845,11 +1021,29 @@ impl World {
                     (LAMP_CROSS, LAMP_EVERY, Prop::Lamp),
                     (TREE_CROSS, TREE_EVERY, Prop::Tree),
                     (PLANTER_CROSS, PLANTER_EVERY, Prop::Planter),
+                    (BENCH_CROSS, BENCH_EVERY, Prop::Bench),
+                    (BOOTH_CROSS, BOOTH_EVERY, Prop::Booth),
+                    (KERB_CROSS, STOP_EVERY, Prop::Stop),
+                    (PYLON_CROSS, PYLON_EVERY, Prop::Pylon),
+                    // **Not on a spacing, because a drive-through is not a
+                    // pattern — it is wherever a fast-food counter is.** Every
+                    // kerb cell is a candidate and almost all of them are
+                    // rejected by one `city_cell` call in `serves_fastfood`;
+                    // giving this a stride instead would put hatches opposite
+                    // blank walls and leave real counters without one.
+                    (KERB_CROSS, 1, Prop::Hatch),
                 ] {
                     for c in crosses {
                         let across = strip + c;
-                        let lo = (if along_x { ix } else { iz }) - r;
-                        let hi = (if along_x { ix } else { iz }) + r;
+                        // **Per-kind reach.** Everything here but the hatch is
+                        // generated at a spacing and is nearly free; the hatch
+                        // is a scan of every cell of kerb, so it gets its own
+                        // shorter reach. See `HATCH_REACH`.
+                        let kr = if kind == Prop::Hatch { HATCH_REACH.min(radius) } else { radius };
+                        let kr2 = kr * kr;
+                        let kri = kr.ceil() as i32;
+                        let lo = (if along_x { ix } else { iz }) - kri;
+                        let hi = (if along_x { ix } else { iz }) + kri;
                         // Phase the run off the strip so parallel streets are
                         // not in lockstep.
                         let phase = (hash3(b, c, self.seed ^ 0x9A) % every as u32) as i32;
@@ -874,7 +1068,7 @@ impl World {
                             // most of the candidates gone for almost nothing.
                             let dx = gx as f32 + 0.5 - cx;
                             let dz = gz as f32 + 0.5 - cz;
-                            if dx * dx + dz * dz > r2 {
+                            if dx * dx + dz * dz > kr2 {
                                 continue;
                             }
                             let h = hash3(gx.wrapping_mul(2237), gz.wrapping_mul(3571),
@@ -884,6 +1078,15 @@ impl World {
                                 Prop::Lamp => h % 100 < 88,
                                 Prop::Tree => h % 100 < 70,
                                 Prop::Planter => h % 100 < 34,
+                                Prop::Bench => h % 100 < 30,
+                                Prop::Booth => h % 100 < 26,
+                                Prop::Stop => h % 100 < 55,
+                                // A pylon is sized to a business, not scattered
+                                // along a street: whether there is one is
+                                // whether there is something behind it worth
+                                // naming, tested below.
+                                Prop::Pylon => h % 100 < 22,
+                                Prop::Hatch => true,
                             };
                             if !keep {
                                 continue;
@@ -904,10 +1107,129 @@ impl World {
                                 Prop::Lamp => 4.3 + ((h >> 16) % 9) as f32 * 0.11,
                                 Prop::Tree => 3.1 + ((h >> 16) % 13) as f32 * 0.16,
                                 Prop::Planter => 0.62 + ((h >> 16) % 5) as f32 * 0.05,
+                                Prop::Bench => 0.78 + ((h >> 16) % 4) as f32 * 0.04,
+                                Prop::Booth => 2.45 + ((h >> 16) % 5) as f32 * 0.06,
+                                Prop::Stop => 3.05 + ((h >> 16) % 5) as f32 * 0.08,
+                                Prop::Hatch => 2.7,
+                                // Tall enough to clear a van and be read from
+                                // down the avenue, which is the whole point of
+                                // a pylon rather than a board on a wall.
+                                Prop::Pylon => 6.4 + ((h >> 16) % 5) as f32 * 0.12,
                             };
-                            out.push(Placed { x, z, kind, height, seed: h });
+                            // **What this thing is ABOUT**, for the two kinds
+                            // that name a real business. Both look the same way
+                            // — in from the avenue to the first solid cell —
+                            // and both take the answer from the world rather
+                            // than carrying one of their own.
+                            let (sx, sz) = Self::inward_of(along_x, c);
+                            let (about, facing) = match kind {
+                                Prop::Hatch => {
+                                    // A hatch exists only where a bay does, and
+                                    // the bay is the kerb lane beside it. Same
+                                    // predicate, so the markings on the road,
+                                    // the person serving and the car that stops
+                                    // cannot disagree.
+                                    // The kerb is one cell OUTWARD of the lane's
+                                    // own offset on either side of the avenue,
+                                    // so the lane is one step away from the
+                                    // building, whichever side this is.
+                                    let (lx, lz) = (gx - sx, gz - sz);
+                                    debug_assert!(KERB_LANE.contains(&if along_x {
+                                        lz.rem_euclid(BLOCK) - BLOCK_BUILT
+                                    } else {
+                                        lx.rem_euclid(BLOCK) - BLOCK_BUILT
+                                    }));
+                                    let Some(b) = self.serves_fastfood(lx, lz, sx, sz) else {
+                                        continue;
+                                    };
+                                    // **One hatch per entrance.** A doorway is
+                                    // two cells wide, so two kerb cells look in
+                                    // and both find it; two kiosks side by side
+                                    // are a wall rather than a serving window.
+                                    // The first of the run wins.
+                                    let back = if along_x { (lx - 1, lz) } else { (lx, lz - 1) };
+                                    if self.serves_fastfood(back.0, back.1, sx, sz).is_some() {
+                                        continue;
+                                    }
+                                    // It faces the road it serves, not the shop
+                                    // behind it.
+                                    (b, (-sx as i8, -sz as i8))
+                                }
+                                Prop::Pylon => {
+                                    let Some((wx, wz, wc)) =
+                                        self.wall_inward(gx, gz, sx, sz, 2, SERVE_REACH)
+                                    else {
+                                        continue;
+                                    };
+                                    if wc.plan == 0 {
+                                        continue;
+                                    }
+                                    ((wx, wz, wc.plan), (sx as i8, sz as i8))
+                                }
+                                _ => ((0, 0, 0), (0, 0)),
+                            };
+                            out.push(Placed { x, z, kind, height, seed: h, about, facing });
                         }
                     }
+                }
+            }
+        }
+        self.park_seats(cx, cz, radius, out);
+    }
+
+    /// **Seats in a park.** The one piece of furniture placed by AREA rather
+    /// than along a street line, and it has to be: a park is a whole built
+    /// quadrant (`city_cell`'s civic hash), not a strip with two sides and a
+    /// kerb, so there is no line to walk. It is still an enumeration and not a
+    /// search — parks are four blocks in a hundred, and a park that is in range
+    /// offers sixteen lattice points — so the cost is a rounding error on the
+    /// street walk above and nothing is scanned for.
+    fn park_seats(&self, cx: f32, cz: f32, radius: f32, out: &mut Vec<Placed>) {
+        let r = radius.ceil() as i32;
+        let (ix, iz) = (cx.floor() as i32, cz.floor() as i32);
+        let r2 = radius * radius;
+        for bz in (iz - r).div_euclid(BLOCK)..=(iz + r).div_euclid(BLOCK) {
+            for bx in (ix - r).div_euclid(BLOCK)..=(ix + r).div_euclid(BLOCK) {
+                if !self.is_park(bx, bz) {
+                    continue;
+                }
+                let mut oz = 2;
+                while oz < BLOCK_BUILT {
+                    let mut ox = 2;
+                    while ox < BLOCK_BUILT {
+                        let (gx, gz) = (bx * BLOCK + ox, bz * BLOCK + oz);
+                        ox += PARK_SEAT_EVERY;
+                        let dx = gx as f32 + 0.5 - cx;
+                        let dz = gz as f32 + 0.5 - cz;
+                        if dx * dx + dz * dz > r2 {
+                            continue;
+                        }
+                        let h = hash3(
+                            gx.wrapping_mul(2237),
+                            gz.wrapping_mul(3571),
+                            self.seed ^ 0x5E,
+                        );
+                        if h % 100 < 42 {
+                            continue;
+                        }
+                        // A park is greenery from edge to edge, but ask rather
+                        // than assume: this is the same cell the renderer will
+                        // draw the ground from.
+                        let cell = self.city_cell(gx, gz);
+                        if cell.height != 0 || cell.surface != surface::GREENERY {
+                            continue;
+                        }
+                        out.push(Placed {
+                            x: gx as f32 + 0.5 + ((h >> 8) % 5) as f32 / 12.0 - 0.17,
+                            z: gz as f32 + 0.5 + ((h >> 12) % 5) as f32 / 12.0 - 0.17,
+                            kind: Prop::Bench,
+                            height: 0.78 + ((h >> 16) % 4) as f32 * 0.04,
+                            seed: h,
+                            about: (0, 0, 0),
+                            facing: (0, 0),
+                        });
+                    }
+                    oz += PARK_SEAT_EVERY;
                 }
             }
         }

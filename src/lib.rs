@@ -2070,7 +2070,12 @@ mod tests {
     fn a_floor_number_on_the_shaft_wall_reads_left_to_right_in_every_orientation() {
         // (seed, expected room.ix, expected room.iz) — one of each of the
         // four cardinal entrance directions, found by inspection.
-        let cases = [(703703u32, 0, 1), (22u32, 1, 0), (456u32, 0, -1), (4242u32, -1, 0)];
+        // Re-found after the room families were extended: a building's
+        // ground-floor family sets its ceiling height, which sets its storey
+        // table, which is what `walk_into_a_lift` sorts on — so adding a family
+        // changes WHICH building each seed walks into. The property under test
+        // is unchanged and so is the coverage: one seed of each of the four.
+        let cases = [(412u32, 0, 1), (40u32, 1, 0), (1u32, 0, -1), (4u32, -1, 0)];
         for (seed, want_ix, want_iz) in cases {
             let (mut e, _) = walk_into_a_lift(seed);
             let car_in = e.room().unwrap().point_of(2.5, 6.0);
@@ -2403,7 +2408,7 @@ mod tests {
         w.props_near(4096.5, 4096.5, 90.0, &mut props);
         assert!(props.len() > 30, "only {} props within 90 units", props.len());
 
-        let mut kinds = [0usize; 3];
+        let mut kinds = [0usize; 7];
         for p in &props {
             let c = w.cell(p.x.floor() as i32, p.z.floor() as i32);
             assert_eq!(c.height, 0, "a {:?} is standing inside a building", p.kind);
@@ -2426,9 +2431,21 @@ mod tests {
                 world::Prop::Lamp => 0,
                 world::Prop::Tree => 1,
                 world::Prop::Planter => 2,
+                world::Prop::Bench => 3,
+                world::Prop::Booth => 4,
+                world::Prop::Stop => 5,
+                world::Prop::Pylon => 6,
+                // A hatch is not scattered along a street: there is one where
+                // there is a fast-food counter and nowhere else, so a given
+                // ninety-unit disc may honestly contain none. It is covered by
+                // `a_drive_through_is_a_bay_a_hatch_and_a_car_that_stops`.
+                world::Prop::Hatch => continue,
             }] += 1;
         }
-        assert!(kinds.iter().all(|&n| n > 0), "expected all three kinds, got {kinds:?}");
+        assert!(
+            kinds.iter().all(|&n| n > 0),
+            "expected every scattered kind, got {kinds:?}"
+        );
 
         // Placement is a pure function of position, like every other feature of
         // this city — walk away and come back and the lamps are where you left
@@ -2507,5 +2524,194 @@ mod tests {
         assert!(!w.solid(cam.x.floor() as i32, cam.z.floor() as i32),
                 "ended up inside a building at {},{}", cam.x, cam.z);
     }
-}
 
+    /// **The drive-through, end to end.** Not "a bay exists" and not "a hatch
+    /// draws" — a car that is going about its business stops at one, is served,
+    /// and drives off, and the thing it stopped at is a fast-food counter.
+    ///
+    /// The promise runs one way and this checks that direction: every bay in a
+    /// wide box is opposite a `Room::FastFood` entrance, and every hatch is
+    /// beside a bay. Fast food without a drive-through is allowed — a unit with
+    /// no kerb lane in front of it cannot have one — the same shape of promise
+    /// `a_landmark_always_has_a_lift_in_it` makes.
+    #[test]
+    fn a_drive_through_is_a_bay_a_hatch_and_a_car_that_stops() {
+        let w = World::new(90210);
+        // Every bay is carriageway, in a kerb lane, opposite a fast-food door.
+        let mut bays = 0;
+        for z in 3900..4300 {
+            for x in 3900..4300 {
+                let Some((sx, sz)) = w.drive_bay(x, z) else { continue };
+                bays += 1;
+                let c = w.city_cell(x, z);
+                assert_eq!(c.surface, world::surface::ROADWAY, "a bay off the carriageway");
+                assert_eq!(c.height, 0);
+                assert!(
+                    c.cross == 5 || c.cross == 10,
+                    "a bay at cross {} — not a kerb lane",
+                    c.cross
+                );
+                // The unit it serves. Walk in the way the world says, and it
+                // must be a door face belonging to a fast-food room.
+                let mut found = None;
+                for d in -1..=1 {
+                    let (ax, az) = if sz != 0 { (x + d, z) } else { (x, z + d) };
+                    for k in 6..=9 {
+                        let (wx, wz) = (ax + sx * k, az + sz * k);
+                        let wc = w.city_cell(wx, wz);
+                        if wc.height == 0 {
+                            continue;
+                        }
+                        if (5..=8).contains(&wc.door) && wc.plan != 0 {
+                            let r = interior::ground_room(
+                                wx.div_euclid(world::BLOCK),
+                                wz.div_euclid(world::BLOCK),
+                                wc.plan,
+                                w.seed,
+                            );
+                            if r == interior::Room::FastFood {
+                                found = Some(r);
+                            }
+                        }
+                        break;
+                    }
+                }
+                assert_eq!(
+                    found,
+                    Some(interior::Room::FastFood),
+                    "a bay at {x},{z} that is not in front of a fast-food counter"
+                );
+            }
+        }
+        assert!(bays > 20, "only {bays} bays in a 400x400 box");
+
+        // Every hatch stands beside a bay and names the unit it serves.
+        let mut props = Vec::new();
+        w.props_near(4100.5, 4100.5, 140.0, &mut props);
+        let hatches: Vec<_> =
+            props.iter().filter(|p| p.kind == world::Prop::Hatch).copied().collect();
+        assert!(!hatches.is_empty(), "no serving hatch within 140 units");
+        for h in &hatches {
+            let (bx, bz) = ((h.x + h.facing.0 as f32).floor() as i32,
+                            (h.z + h.facing.1 as f32).floor() as i32);
+            assert!(w.drive_bay(bx, bz).is_some(), "a hatch with no bay in front of it");
+            assert_eq!(
+                interior::ground_room(
+                    h.about.0.div_euclid(world::BLOCK),
+                    h.about.1.div_euclid(world::BLOCK),
+                    h.about.2,
+                    w.seed,
+                ),
+                interior::Room::FastFood,
+                "a hatch serving something that is not a fast-food counter"
+            );
+        }
+
+        // And now the behaviour: run the engine with no keys held and watch a
+        // car pull up, wait, and go. A car that never moves again would pass a
+        // "did it stop" test and be a car park, so the test is stop AND go.
+        let mut e = Engine::new(120, 40, 1.0, 2.0, 90210);
+        let mut stopped: Option<usize> = None;
+        let mut held = 0;
+        let mut moved_off = false;
+        for _ in 0..2400 {
+            e.step(1.0 / 60.0, 0, 0.0, 0.0);
+            match stopped {
+                None => {
+                    if let Some(i) = e.pop.vehs.iter().position(|v| v.hold > 0.0) {
+                        stopped = Some(i);
+                    }
+                }
+                Some(i) => {
+                    let v = e.pop.vehs[i];
+                    if v.hold > 0.0 {
+                        held += 1;
+                        assert!(
+                            e.world.drive_bay(v.x.floor() as i32, v.z.floor() as i32).is_some(),
+                            "a car is holding somewhere that is not a bay"
+                        );
+                    } else if held > 0 {
+                        moved_off = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(stopped.is_some(), "no car stopped at a drive-through in 40 seconds");
+        assert!(held > 60, "a car stopped for only {held} frames — that is not a transaction");
+        assert!(moved_off, "a car stopped at the hatch and never left — that is a car park");
+    }
+
+    /// **A pylon cannot advertise something that is not there.** Its name, its
+    /// trade and its three lines all come out of the world model, so the test
+    /// is that they agree with the building it points at — and that the arrow
+    /// points at a building at all, rather than down an empty street.
+    #[test]
+    fn a_pylon_names_the_business_behind_it_and_points_at_it() {
+        for seed in [90210u32, 0xACC17, 7] {
+            let w = World::new(seed);
+            let mut props = Vec::new();
+            w.props_near(4100.5, 4100.5, 120.0, &mut props);
+            let pylons: Vec<_> =
+                props.iter().filter(|p| p.kind == world::Prop::Pylon).copied().collect();
+            assert!(pylons.len() > 3, "seed {seed}: only {} pylons", pylons.len());
+            for p in &pylons {
+                let c = w.city_cell(p.about.0, p.about.1);
+                assert!(c.height > 0 && c.plan != 0, "a pylon pointing at open ground");
+                assert_eq!(c.plan, p.about.2, "a pylon naming a plan that is not there");
+                // The arrow's direction is the world step it carries, and it
+                // has to actually reach the building from the sign.
+                let (sx, sz) = (p.facing.0 as i32, p.facing.1 as i32);
+                assert!(sx.abs() + sz.abs() == 1, "a pylon facing nowhere");
+                let along = (p.about.0 - p.x.floor() as i32) * sx
+                    + (p.about.1 - p.z.floor() as i32) * sz;
+                assert!(along > 0, "a pylon whose arrow points away from what it names");
+                // The words: the same two functions the fascia over the door
+                // uses, and three lines keyed only on the trade.
+                let room = interior::ground_room(
+                    p.about.0.div_euclid(world::BLOCK),
+                    p.about.1.div_euclid(world::BLOCK),
+                    p.about.2,
+                    w.seed,
+                );
+                assert_eq!(room.offers(), room.offers());
+                for l in room.offers() {
+                    assert!(!l.is_empty() && l.len() <= interior::PYLON_LINE_MAX,
+                            "\"{l}\" will not fit on a board");
+                }
+            }
+        }
+    }
+
+    /// Every room family has its own word and its own three offers, and no two
+    /// share either. Two tables saying what one building is is one table too
+    /// many, and two families saying the same thing is the same bug a table
+    /// apart — `ORBIT CLINIC` on the front of `ORBIT GALLERY` started exactly
+    /// here.
+    #[test]
+    fn every_room_family_says_something_different() {
+        use interior::Room::*;
+        let all = [
+            Lobby, Offices, Market, Workshop, Gallery, Concourse, Residence, Plant, Bar,
+            Archive, FastFood, Clinic, Arcade, Garage,
+        ];
+        let mut words: Vec<&str> = all.iter().map(|r| r.word()).collect();
+        words.sort_unstable();
+        let n = words.len();
+        words.dedup();
+        assert_eq!(words.len(), n, "two families answer to the same word");
+
+        // Every family is reachable: the generator indexes the style table by a
+        // hash, so a family nothing ever picks is a row nobody will ever see.
+        let w = World::new(90210);
+        let mut seen = std::collections::HashSet::new();
+        for bz in 0..40 {
+            for bx in 0..40 {
+                for plan in 1..40u16 {
+                    seen.insert(interior::ground_room(bx, bz, plan, w.seed));
+                }
+            }
+        }
+        assert_eq!(seen.len(), all.len(), "only {} of {} families ever occur", seen.len(), all.len());
+    }
+}

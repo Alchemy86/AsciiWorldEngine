@@ -61,6 +61,15 @@ const FASCIA: [u8; 4] = [b'-', b'=', b'=', b'+'];
 /// name, and a wrong name is worse than none.
 const SIGN_FADE: f32 = 46.0;
 
+/// **How big a pylon's board is, in world units.** Half-width and the depth of
+/// the board below its top. Both were arrived at the way `lift::CORE_W` was —
+/// by shooting `--drivethru` and looking — and both are rendering requirements
+/// before they are design ones: the board has to be wide enough in COLUMNS at
+/// a readable distance to set `PYLON_LINE_MAX` characters solid, or the sign
+/// degrades to a blank board and says nothing at all.
+const PYLON_HALF_W: f32 = 1.7;
+const PYLON_PANEL_H: f32 = 3.6;
+
 /// The characters a fascia carries: the building's own `NAME TRADE`, parted at
 /// `name_len` so the two words read as two words, and `LIFT` after it when the
 /// building has one. Written into a caller-owned buffer, so the pass touches no
@@ -300,6 +309,8 @@ pub struct Renderer {
     /// column, allocated once. See `fascias` for why a building's name cannot
     /// be drawn where the band itself is drawn.
     sign_cols: Vec<Option<SignCol>>,
+    /// Pylon writing, held over; see `PylonLine`. Allocated once.
+    pylon_q: Vec<PylonLine>,
     /// Distance to the ceiling plane at each screen row. The ground has a
     /// standing table on `Projection` because its height never changes; a
     /// ceiling's does, per room, so it is filled in here at the top of the
@@ -321,6 +332,24 @@ struct SignCol {
     hue: f32,
 }
 
+/// **One line of a pylon's writing, held over to a second pass.** The plate's
+/// design and for the plate's reason: a pylon is drawn with the rest of the
+/// street furniture, so a bus stop nearer than it is drawn AFTER it and takes
+/// whatever cells it stands in front of. That is correct occlusion for a post
+/// and catastrophic for a word — `TOKENS INSIDE` losing its last cell reads as
+/// `TOKENS INSID`, which is the registration plate's `1 RG` becoming `1 R`
+/// exactly. So the board is drawn in place and the writing waits until every
+/// other prop is in the depth buffer, and then goes down all-or-nothing.
+#[derive(Clone, Copy)]
+struct PylonLine {
+    dist: f32,
+    x0: i32,
+    row: i32,
+    rgb: [u8; 3],
+    text: [u8; crate::interior::PYLON_LINE_MAX],
+    len: u8,
+}
+
 /// One plate, held over to the second pass.
 #[derive(Clone, Copy)]
 struct PlateDraw {
@@ -339,6 +368,7 @@ impl Renderer {
             props: Vec::with_capacity(512),
             plate_q: Vec::with_capacity(crate::entities::VEH_COUNT),
             sign_cols: vec![None; cols],
+            pylon_q: Vec::with_capacity(64),
             ceil_d: Vec::new(),
         }
     }
@@ -387,8 +417,11 @@ impl Renderer {
                 // Waiting for the props was tried and it is why almost no
                 // building on a busy street had a name at all.
                 self.fascias(grid, world, proj.cols);
-                self.props(grid, world, cam, proj);
+                self.props(grid, world, cam, proj, pop);
                 self.population(grid, cam, proj, pop);
+                // The pylons' writing, last of everything solid — see
+                // `pylon_text` for why it cannot go down with the boards.
+                self.pylon_text(grid);
                 self.rain(grid, cam, proj, sky_fx);
             }
             Place::Indoors(room) => {
@@ -1924,17 +1957,40 @@ impl Renderer {
     /// lamp down the far end of a street is dim and a lamp round the corner is
     /// simply not there. They are placed by the world generator
     /// (`World::props_near`), not scattered here.
-    fn props(&mut self, g: &mut Grid, world: &World, cam: &Camera, proj: &Projection) {
+    fn props(
+        &mut self,
+        g: &mut Grid,
+        world: &World,
+        cam: &Camera,
+        proj: &Projection,
+        pop: &Population,
+    ) {
         // Beyond this a lamppost is thinner than a character and reads as
         // speckle on the pavement, which is worse than nothing.
         const RANGE: f32 = 58.0;
         world.props_near(cam.x, cam.z, RANGE, &mut self.props);
+        // **Far to near.** Street furniture used to be drawn in the order it
+        // was generated, which is by street line and then by kind — so a
+        // lamppost thirty units away could be drawn after, and at equal depth
+        // over, a sign three units from the camera. It did not show while the
+        // furniture was posts and canopies; a pylon is a sign with WRITING on
+        // it, and one leaf of a tree behind it landing in the middle of
+        // `TOKENS INSIDE` is a different offer. Sorting costs a few hundred
+        // comparisons on a list that is already gathered.
+        let (cx, cz) = (cam.x, cam.z);
+        self.props.sort_unstable_by(|a, b| {
+            let d = |p: &Placed| (p.x - cx) * (p.x - cx) + (p.z - cz) * (p.z - cz);
+            d(b).total_cmp(&d(a))
+        });
         let (fx, fz) = cam.forward();
         let (rx, rz) = cam.right();
         let cols = proj.cols as i32;
         let rows = proj.rows as i32;
 
-        for p in &self.props {
+        self.pylon_q.clear();
+        for i in 0..self.props.len() {
+            let p = self.props[i];
+            let p = &p;
             let tx = p.x - cam.x;
             let tz = p.z - cam.z;
             let fd = tx * fx + tz * fz;
@@ -2088,7 +2144,435 @@ impl Renderer {
                         }
                     }
                 }
+                Prop::Bench => {
+                    // Back, seat, legs. Wide and low, so it reads as somewhere
+                    // to sit rather than as another box on the pavement — the
+                    // WIDTH is what tells the two apart at forty units.
+                    let half_w = wide(0.72).max(1);
+                    let seat_row = proj.row_of(p.height * 0.55, fd).round() as i32;
+                    let slat = hsl(26.0, 34.0, 22.0 + 24.0 * b);
+                    let frame = hsl(206.0, 10.0, 16.0 + 18.0 * b);
+                    for y in top..=bot {
+                        if y < 0 || y >= rows { continue; }
+                        for x in x0 - half_w..=x0 + half_w {
+                            if self.hidden(x, fd) { continue; }
+                            let end = x == x0 - half_w || x == x0 + half_w;
+                            let (ch, col) = if y <= seat_row.min(bot - 1).max(top) {
+                                (if end { b'|' } else { b'=' }, slat)
+                            } else if y == bot {
+                                (if end { b'|' } else { b'_' }, frame)
+                            } else if end {
+                                (b'|', frame)
+                            } else {
+                                (b'-', slat)
+                            };
+                            g.put(x, y, ch, col, fd);
+                        }
+                    }
+                }
+                Prop::Booth => {
+                    // A lit glass box. The glazing is the point: a dark box at
+                    // this size is a bollard, and a LIT one at head height is
+                    // unmistakably something you stand in.
+                    let half_w = wide(0.40).max(1);
+                    let head = proj.row_of(p.height - 0.42, fd).round() as i32;
+                    let frame = hsl(348.0, 62.0, 22.0 + 20.0 * b);
+                    let glass = hsl(192.0, 74.0, 26.0 + 30.0 * b);
+                    let sign = hsl(192.0, 96.0, 54.0 + 30.0 * b);
+                    for y in top..=bot {
+                        if y < 0 || y >= rows { continue; }
+                        for x in x0 - half_w..=x0 + half_w {
+                            if self.hidden(x, fd) { continue; }
+                            let end = x == x0 - half_w || x == x0 + half_w;
+                            if y <= head {
+                                // The lit header band over the door.
+                                g.put(x, y, if end { b'+' } else { b'=' }, sign, fd);
+                            } else if end {
+                                g.put(x, y, b'|', frame, fd);
+                            } else {
+                                let n = noise(5 * x + 17 * p.seed as i32, 3 * y);
+                                g.put(x, y, if n > 0.6 { b':' } else { b'.' }, glass, fd);
+                            }
+                        }
+                    }
+                }
+                Prop::Stop => {
+                    // A flag on a post, and a shelter roof beside it. The flag
+                    // is what you see from down the street; the roof is what
+                    // says it is a place to wait rather than a sign.
+                    let flag_bot = proj.row_of(p.height - 0.85, fd).round() as i32;
+                    let roof_row = proj.row_of(p.height * 0.72, fd).round() as i32;
+                    let post = hsl(206.0, 12.0, 18.0 + 18.0 * b);
+                    let flag = hsl(28.0, 96.0, 44.0 + 30.0 * b);
+                    let shaft = wide(0.07);
+                    for y in top..=bot {
+                        if y < 0 || y >= rows { continue; }
+                        for x in x0 - shaft..=x0 + shaft {
+                            if self.hidden(x, fd) { continue; }
+                            g.put(x, y, b'|', post, fd);
+                        }
+                    }
+                    let fw = wide(0.44).max(1);
+                    for y in top..=flag_bot.min(bot) {
+                        if y < 0 || y >= rows { continue; }
+                        for x in x0 - fw..=x0 + fw {
+                            if self.hidden(x, fd) { continue; }
+                            let end = x == x0 - fw || x == x0 + fw;
+                            g.put(x, y, if end { b'+' } else { b'=' }, flag, fd);
+                        }
+                    }
+                    // The shelter, offset to one side so it does not read as a
+                    // second flag hanging off the same post.
+                    let side = if p.seed & 1 == 0 { 1 } else { -1 };
+                    let rw = wide(1.25).max(2);
+                    if roof_row > flag_bot && roof_row < bot {
+                        for k in 0..=rw {
+                            let x = x0 + side * k;
+                            if self.hidden(x, fd) { continue; }
+                            if roof_row >= 0 && roof_row < rows {
+                                g.put(x, roof_row, b'-', post, fd);
+                            }
+                            if k == rw {
+                                for y in roof_row + 1..=bot {
+                                    if y < 0 || y >= rows { continue; }
+                                    g.put(x, y, b'|', post, fd);
+                                }
+                            }
+                        }
+                    }
+                }
+                Prop::Hatch => self.hatch(g, cam, proj, pop, p, fd, x0, top, bot, b, &wide),
+                Prop::Pylon => self.pylon(g, world, cam, proj, p, fd, x0, top, bot, b, &wide),
             }
+        }
+    }
+
+    /// **A pylon's writing, set after everything else in the street.**
+    ///
+    /// The board itself goes down with the rest of the furniture, in its own
+    /// place in the depth order. The WRITING waits — for the other props, for
+    /// the traffic and for the people — because it is all-or-nothing and the
+    /// test can only be made against a finished street: a pedestrian who walks
+    /// in front of `TOKENS INSIDE` after it was set leaves `TOKENS INSID`,
+    /// which is a different offer, and that is the registration plate's `1 RG`
+    /// becoming `1 R` exactly. So this is the plate's mechanism, reused: held
+    /// over, tested whole, and marked (`put_plate`) so the rain will not put a
+    /// drop through a letter either.
+    ///
+    /// Nearest first, which is the opposite of the boards. A board is solid and
+    /// a near one should cover a far one; two names in overlapping columns are
+    /// not, and whichever went down second used to leave the other reading
+    /// `ORKS` and `CIN`. Near first means the far line's run is no longer clear
+    /// and it is not set at all.
+    fn pylon_text(&mut self, g: &mut Grid) {
+        self.pylon_q.sort_unstable_by(|a, b| a.dist.total_cmp(&b.dist));
+        for q in 0..self.pylon_q.len() {
+            let l = self.pylon_q[q];
+            let n = l.len as i32;
+            if !g.run_is_clear(l.x0, l.row, n, l.dist) {
+                continue;
+            }
+            for i in 0..n {
+                let ch = l.text[i as usize];
+                if ch != b' ' {
+                    g.put_plate(l.x0 + i, l.row, ch, l.rgb, l.dist);
+                }
+            }
+        }
+    }
+
+    /// **The serving hatch of a drive-through, and the person in it.**
+    ///
+    /// The kiosk is a box with its upper third open, a lit canopy over it and a
+    /// figure standing in the opening. What makes it read as a drive-through
+    /// rather than as a kiosk is the BAY: a painted box in the lane beside it,
+    /// drawn on the ground at the lane cell's own distance, which is exactly
+    /// the cell `World::drive_bay` stops cars on. The paint and the car agree
+    /// because they are the same function, not because they were matched up.
+    ///
+    /// The figure turns to face the road when there is somebody in the bay, and
+    /// the canopy lights. That is the only thing here that is not a pure
+    /// function of position, and it is read straight off the population rather
+    /// than stored anywhere.
+    #[allow(clippy::too_many_arguments)]
+    fn hatch(
+        &mut self,
+        g: &mut Grid,
+        cam: &Camera,
+        proj: &Projection,
+        pop: &Population,
+        p: &Placed,
+        fd: f32,
+        x0: i32,
+        top: i32,
+        bot: i32,
+        b: f32,
+        wide: &impl Fn(f32) -> i32,
+    ) {
+        let rows = proj.rows as i32;
+        let half_w = wide(0.62).max(1);
+        let sill = proj.row_of(p.height * 0.56, fd).round() as i32;
+        let lintel = proj.row_of(p.height - 0.4, fd).round() as i32;
+        // Is anybody being served? A stopped car is one whose `hold` is not
+        // zero — pulled up, or pulling away having been served.
+        let (bx, bz) = (p.x + p.facing.0 as f32, p.z + p.facing.1 as f32);
+        let serving = pop
+            .vehs
+            .iter()
+            .any(|v| v.hold != 0.0 && (v.x - bx).hypot(v.z - bz) < 2.8);
+        let lit = if serving { 1.0 } else { 0.55 };
+        let body = hsl(18.0, 46.0, 20.0 + 20.0 * b);
+        let canopy = hsl(34.0, 96.0, 34.0 + 34.0 * b * lit);
+        let dark = hsl(210.0, 16.0, 8.0 + 10.0 * b);
+        for y in top..=bot {
+            if y < 0 || y >= rows {
+                continue;
+            }
+            for x in x0 - half_w..=x0 + half_w {
+                if self.hidden(x, fd) {
+                    continue;
+                }
+                let end = x == x0 - half_w || x == x0 + half_w;
+                if y <= lintel {
+                    g.put(x, y, if end { b'+' } else { b'=' }, canopy, fd);
+                } else if y == sill - 1 {
+                    // The counter itself: the one line you hand money across.
+                    g.put(x, y, if end { b'|' } else { b'_' }, canopy, fd);
+                } else if y < sill {
+                    // The opening. Dark, but not a hole — an unlit window and
+                    // a black rectangle look the same until you put some grain
+                    // in it, and then one of them is a room behind a counter.
+                    let n = noise(3 * x + 29 * p.seed as i32, 7 * y);
+                    g.put(
+                        x,
+                        y,
+                        if end { b'|' } else if n > 0.66 { b'.' } else { b' ' },
+                        dark,
+                        fd,
+                    );
+                } else {
+                    g.put(x, y, if end { b'|' } else { b'#' }, body, fd);
+                }
+            }
+        }
+        // **The server**, standing behind the counter rather than floating at
+        // the top of the opening — the figure is sized to the OPENING, so it is
+        // a person at any distance instead of two characters that vanish as
+        // soon as the kiosk is more than a few units off. It steps toward the
+        // bay when there is a car in it; which side that is comes off `facing`
+        // projected into the view, so the lean is toward the actual road.
+        let (rx, rz) = cam.right();
+        let lean = (p.facing.0 as f32 * rx + p.facing.1 as f32 * rz).signum() as i32;
+        let skin = hsl(28.0, 54.0, 34.0 + 28.0 * b);
+        let coat = hsl(34.0, 70.0, 26.0 + 26.0 * b * lit);
+        let open_h = (sill - 1 - lintel).max(2);
+        let fig_top = lintel + open_h / 4;
+        let fig_bot = sill - 2;
+        let head_bot = fig_top + ((fig_bot - fig_top) / 3).max(0);
+        let hw = wide(0.13);
+        let bw = wide(0.20).max(hw);
+        let step = if serving { (bw + 1) * lean } else { 0 };
+        for y in fig_top..=fig_bot {
+            if y < 0 || y >= rows {
+                continue;
+            }
+            let (half, ch, col) =
+                if y <= head_bot { (hw, b'0', skin) } else { (bw, b'#', coat) };
+            for x in x0 + step - half..=x0 + step + half {
+                if self.hidden(x, fd) {
+                    continue;
+                }
+                g.put(x, y, ch, col, fd);
+            }
+        }
+        // The bay, painted on the road at its own distance.
+        let (fx, fz) = cam.forward();
+        let (tx, tz) = (bx - cam.x, bz - cam.z);
+        let bd = tx * fx + tz * fz;
+        if bd < 0.4 {
+            return;
+        }
+        let boff = tx * rx + tz * rz;
+        let bcol = (proj.cols as f32 / 2.0 + (proj.proj_x / bd) * boff).round() as i32;
+        let brow = proj.row_of(0.0, bd).floor() as i32;
+        let bw = ((0.9 * proj.proj_x / bd).round() as i32).clamp(1, proj.cols as i32 / 8);
+        let paint = hsl(48.0, 88.0, 30.0 + 36.0 * b * lit);
+        for dy in 0..2 {
+            let y = brow - dy;
+            if y < 0 || y >= rows {
+                continue;
+            }
+            for x in bcol - bw..=bcol + bw {
+                if self.hidden(x, bd) {
+                    continue;
+                }
+                let edge = x == bcol - bw || x == bcol + bw;
+                let ch = if dy == 1 && !edge { b'-' } else if edge { b'!' } else { b'.' };
+                g.put(x, y, ch, paint, bd - 0.02);
+            }
+        }
+    }
+
+    /// **A branded pylon sign.**
+    ///
+    /// Two posts, a coloured header carrying a name and a trade, an arrow that
+    /// points at the thing named, and a dark panel of what it sells. Every word
+    /// on it comes from the world model: the name from `palette::building_of`
+    /// and the trade from `interior::ground_room` — the same two functions the
+    /// building's own fascia uses — and the three lines under them from
+    /// `Room::offers`, which is keyed on that trade and nothing else. A pylon
+    /// therefore cannot advertise a business that is not behind it.
+    ///
+    /// It is built out of CHARACTERS and paints nothing, for the registration
+    /// plate's reason: everything else on this screen is a coloured glyph on
+    /// black, and one filled rectangle reads as pasted on. It degrades the
+    /// plate's way too — too far off, or too narrow on screen to set a line
+    /// solid, and it is a blank board rather than half a word.
+    #[allow(clippy::too_many_arguments)]
+    fn pylon(
+        &mut self,
+        g: &mut Grid,
+        world: &World,
+        cam: &Camera,
+        proj: &Projection,
+        p: &Placed,
+        fd: f32,
+        x0: i32,
+        top: i32,
+        bot: i32,
+        b: f32,
+        wide: &impl Fn(f32) -> i32,
+    ) {
+        let rows = proj.rows as i32;
+        let half_w = wide(PYLON_HALF_W).max(1);
+        let panel_bot = proj.row_of(p.height - PYLON_PANEL_H, fd).round() as i32;
+        let n_rows = panel_bot - top + 1;
+        let n_cols = 2 * half_w + 1;
+
+        // The posts. Two of them, set in from the edges of the board, because
+        // one post under a wide sign reads as a lollipop.
+        let post = hsl(210.0, 10.0, 12.0 + 14.0 * b);
+        let leg = (half_w * 2 / 3).max(1);
+        for y in (panel_bot + 1).max(0)..=bot.min(rows - 1) {
+            for x in [x0 - leg, x0 + leg] {
+                if self.hidden(x, fd) {
+                    continue;
+                }
+                g.put(x, y, b'|', post, fd);
+            }
+        }
+        if n_rows < 7 || top >= rows || panel_bot < 0 {
+            return;
+        }
+
+        let bld = crate::palette::building_of(
+            p.about.0,
+            p.about.1,
+            p.about.2,
+            crate::world::BLOCK,
+            world.grain,
+        );
+        let room = crate::interior::ground_room(
+            p.about.0.div_euclid(crate::world::BLOCK),
+            p.about.1.div_euclid(crate::world::BLOCK),
+            p.about.2,
+            world.seed,
+        );
+        // The brand colour, stable per business and saturated enough to be the
+        // one warm thing on a cold street.
+        let brand_hue = (crate::rng::hash3(p.about.0 * 271, p.about.1 * 397, world.seed ^ 0x5B)
+            % 360) as f32;
+        let brand = hsl(brand_hue, 84.0, 26.0 + 22.0 * b);
+        let ink = hsl(brand_hue, 10.0, 60.0 + 32.0 * b);
+        let slate = hsl(218.0, 22.0, 7.0 + 8.0 * b);
+        let slate_ink = hsl(200.0, 12.0, 56.0 + 32.0 * b);
+
+        // **The dark panel is a THIRD of the board, not three rows of it.** At
+        // three rows a close sign was a field of brand colour with a caption
+        // lost at the bottom; the reference this is drawn from gives the dark
+        // panel about a third, and so does this.
+        let dark_rows = (n_rows / 3).clamp(4, 9);
+        let head_rows = n_rows - dark_rows;
+        // Fill the board, then set the words into it — the fascia's order, and
+        // for the fascia's reason: the board is a board whether or not there is
+        // room for writing on it.
+        for y in top..=panel_bot {
+            if y < 0 || y >= rows {
+                continue;
+            }
+            let dark = y >= top + head_rows;
+            let (fill, col) = if dark { (b':', slate) } else { (b'#', brand) };
+            for x in x0 - half_w..=x0 + half_w {
+                if self.hidden(x, fd) {
+                    continue;
+                }
+                let end = x == x0 - half_w || x == x0 + half_w;
+                let rule = y == top || y == panel_bot || y == top + head_rows;
+                let ch = if end && rule {
+                    b'+'
+                } else if end {
+                    b'|'
+                } else if rule {
+                    b'='
+                } else {
+                    fill
+                };
+                g.put(x, y, ch, if rule { brand } else { col }, fd);
+            }
+        }
+
+        // One line of writing, centred, QUEUED. A line that does not fit on the
+        // board is not queued at all: half of `PRESCRIPTIONS` is a different
+        // offer, and a board with nothing on it is the honest degradation.
+        let line = |me: &mut Self, y: i32, text: &[u8], col: [u8; 3]| {
+            let n = text.len();
+            if y < 0 || y >= rows || n == 0 || n as i32 > n_cols - 2 {
+                return;
+            }
+            let mut t = [b' '; crate::interior::PYLON_LINE_MAX];
+            t[..n].copy_from_slice(text);
+            me.pylon_q.push(PylonLine {
+                dist: fd,
+                x0: x0 - n as i32 / 2,
+                row: y,
+                rgb: col,
+                text: t,
+                len: n as u8,
+            });
+        };
+
+        // The header: what it is called, what it is, and the way to it.
+        line(self, top + 1, &bld.name[..bld.name_len], ink);
+        line(self, top + 2, room.word().as_bytes(), ink);
+
+        // **The arrow points at the real thing.** The world vector from the
+        // sign to the building it names, turned into the viewer's frame — so a
+        // sign seen from the side points sideways and a sign seen head on
+        // points past itself, which is what a sign does.
+        let (ax, az) = (p.about.0 as f32 + 0.5 - p.x, p.about.1 as f32 + 0.5 - p.z);
+        let (rx, rz) = cam.right();
+        let (fx, fz) = cam.forward();
+        let across = ax * rx + az * rz;
+        let ahead = ax * fx + az * fz;
+        let arrow: &[u8] = if across.abs() > ahead.abs() * 0.6 {
+            if across > 0.0 {
+                b"===>"
+            } else {
+                b"<==="
+            }
+        } else if ahead >= 0.0 {
+            b"/^\\"
+        } else {
+            b"\\v/"
+        };
+        line(self, top + head_rows - 1, arrow, ink);
+
+        // What it sells. Three lines, from the trade and from nowhere else,
+        // spread down the dark panel rather than crammed at the top of it.
+        let step = ((dark_rows - 1) / 3).max(1);
+        for (k, text) in room.offers().iter().enumerate() {
+            debug_assert!(text.len() <= crate::interior::PYLON_LINE_MAX);
+            line(self, top + head_rows + 1 + k as i32 * step, text.as_bytes(), slate_ink);
         }
     }
 
