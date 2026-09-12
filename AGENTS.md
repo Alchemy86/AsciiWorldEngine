@@ -758,6 +758,29 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `plate-*`, `doorway-street`, `interiors`, `life-and-feel`) are historical
   evidence for their own doc pages and are deliberately NOT re-shot.
 
+## Discoverability
+
+- **GitHub topics were already set** (`ascii-art`, `cyberpunk`,
+  `procedural-generation`, `raycasting`, `rust`, `terminal`, `terminal-game`)
+  before anyone had looked — verify with `gh api repos/Alchemy86/AsciiWorldEngine
+  --jq .topics` rather than assuming a public repo has none. `gh-axi repo view`
+  has no `--json`/topics field; the plain `gh` CLI does.
+- **There was no tagged release as of 2026-09.** `Cargo.toml`'s `version`
+  (0.1.0) is the only version anyone has declared; a first tag should match it
+  rather than invent a bump, given the "Coming next" section in the README
+  still lists unbuilt features (basements, more frontends).
+- **`.github/workflows/ci.yml`** builds+tests default features, the
+  dependency-free core (`--no-default-features`), and the wasm feature
+  (compiled for the native target as a compile-check — the real
+  `wasm32-unknown-unknown` build is `./build-wasm.sh` and needs the target
+  installed, which CI does not do). The README's CI badge depends on this
+  workflow actually running on `main`.
+- **`cargo install --path .` works as an alternative to `./play`** for anyone
+  who already has a Rust toolchain — verified: it builds the default (`tui`)
+  feature and installs `asciicity` onto `$PATH`. `publish = false` in
+  `Cargo.toml` is deliberate; there is no crates.io publish to point people at
+  instead.
+
 ## Maintaining this file
 
 Keep entries short, factual and project-intrinsic: things a future session

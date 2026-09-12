@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build (default features — the terminal binary)
+        run: cargo build --release
+      - name: test
+        run: cargo test --release
+      - name: build (core only, no dependencies)
+        run: cargo build --no-default-features
+      - name: build (wasm target)
+        run: cargo build --no-default-features --features wasm

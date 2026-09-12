@@ -6,6 +6,12 @@
   With thanks to <a href="https://grownowgames.com"><b>Grow Now! Games</b></a>, the inspiration for this project.
 </sub></p>
 
+<p align="center">
+  <a href="https://github.com/Alchemy86/AsciiWorldEngine/actions/workflows/ci.yml"><img src="https://github.com/Alchemy86/AsciiWorldEngine/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
+  <a href="https://github.com/Alchemy86/AsciiWorldEngine/releases/latest"><img src="https://img.shields.io/github/v/release/Alchemy86/AsciiWorldEngine" alt="latest release" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue" alt="license: PolyForm Noncommercial 1.0.0" /></a>
+</p>
+
 ---
 
 A cyberpunk city, drawn out of characters, that you can walk around in — down
@@ -42,6 +48,9 @@ git clone https://github.com/Alchemy86/AsciiWorldEngine.git && cd AsciiWorldEngi
 `./play` finds a Rust toolchain (offering to install one if there is none),
 builds in release, and drops you into the city. Everything you pass it goes
 straight through — `./play --demo`, `./play --help`, and every flag below.
+
+Already have a Rust toolchain? `cargo install --path .` from the checkout
+builds the same binary straight onto your `$PATH` as `asciicity`.
 
 ## Controls
 
