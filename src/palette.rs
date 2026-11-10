@@ -616,3 +616,136 @@ pub const PLATE_CAP_R: u8 = b']';
 /// is two more cells of registration at the distance where that decides whether
 /// it can be read at all.
 pub const PLATE_PAD: usize = 2;
+
+// --- shaded cells --------------------------------------------------------
+/// **How much of its cell a glyph inks**, as a percentage, for the character
+/// set this city is drawn with.
+///
+/// A terminal cell is not a pixel: a `@` fills most of its box and a `.` fills
+/// almost none of it, so two cells painted the same colour read as two
+/// different brightnesses. That is the whole reason the wall ramp works —
+/// `WALL_RAMP` is a brightness scale made out of coverage. It is also why the
+/// gaps between glyphs are black: nothing is drawn there at all.
+///
+/// Shading gives the gap a colour, and how much that colour matters depends on
+/// how much gap there is. This table is what says so. The numbers are the
+/// percentage of the box a glyph covers in an ordinary monospace face,
+/// eyeballed to the nearest percent or two and ordered the way the ramp
+/// already orders them;
+/// nothing downstream needs better than that, because the result is multiplied
+/// by a fraction and quantised before it reaches a screen.
+static INK: [u8; 96] = {
+    let mut t = [34u8; 96]; // letters and digits, the common case
+    t[(b' ' - 32) as usize] = 0;
+    t[(b'.' - 32) as usize] = 8;
+    t[(b',' - 32) as usize] = 9;
+    t[(b'\'' - 32) as usize] = 6;
+    t[(b'`' - 32) as usize] = 6;
+    t[(b'"' - 32) as usize] = 10;
+    t[(b':' - 32) as usize] = 15;
+    t[(b';' - 32) as usize] = 17;
+    t[(b'_' - 32) as usize] = 11;
+    t[(b'-' - 32) as usize] = 11;
+    t[(b'~' - 32) as usize] = 14;
+    t[(b'^' - 32) as usize] = 13;
+    t[(b'=' - 32) as usize] = 21;
+    t[(b'+' - 32) as usize] = 23;
+    t[(b'*' - 32) as usize] = 27;
+    t[(b'|' - 32) as usize] = 18;
+    t[(b'/' - 32) as usize] = 19;
+    t[(b'\\' - 32) as usize] = 19;
+    t[(b'(' - 32) as usize] = 18;
+    t[(b')' - 32) as usize] = 18;
+    t[(b'[' - 32) as usize] = 22;
+    t[(b']' - 32) as usize] = 22;
+    t[(b'{' - 32) as usize] = 23;
+    t[(b'}' - 32) as usize] = 23;
+    t[(b'<' - 32) as usize] = 20;
+    t[(b'>' - 32) as usize] = 20;
+    t[(b'o' - 32) as usize] = 30;
+    t[(b'0' - 32) as usize] = 42;
+    t[(b'8' - 32) as usize] = 46;
+    t[(b'$' - 32) as usize] = 48;
+    t[(b'%' - 32) as usize] = 44;
+    t[(b'&' - 32) as usize] = 47;
+    t[(b'#' - 32) as usize] = 54;
+    t[(b'@' - 32) as usize] = 62;
+    t[(b'X' - 32) as usize] = 40;
+    t[(b'Z' - 32) as usize] = 38;
+    t[(b'H' - 32) as usize] = 40;
+    t
+};
+
+/// How much of a surface's own colour survives into the gap behind its glyph.
+///
+/// Not one: a cell whose gap is as bright as its ink is a flat block of colour
+/// with a letter hidden in it, and the ramp — the thing that carries most of
+/// this city's shading — stops meaning anything. A third is enough to close the
+/// black gaps while leaving the ink clearly the brighter half.
+///
+/// Held in 1024ths, because this runs on every cell of every frame and a
+/// background does not need floating point to be a third as bright as its ink.
+pub const SHADE_LEVEL_Q: u32 = 348; // 0.34
+
+/// How much a DENSE glyph darkens its own background, as a percentage.
+///
+/// A `@` leaves almost no gap to fill, so what little there is should sit well
+/// under the ink; a `.` leaves the whole cell, so its background is nearly all
+/// of what the eye gets and has to carry the surface. Without this the ramp
+/// compresses from about 10:1 to about 3:1 and the city goes flat; with it a
+/// solid cell still reads around two and a half times a near-empty one.
+pub const SHADE_INK_BIAS_PCT: u32 = 45;
+
+/// A background is slightly greyer than the ink in front of it, which is what
+/// keeps a wall of lit panes from turning into a wall of solid colour.
+pub const SHADE_DESAT_PCT: u32 = 22;
+
+/// **What each glyph's background is scaled by**, in 1024ths: the level, taken
+/// down by how much of its cell that glyph already covers. One table lookup on
+/// the draw path instead of the arithmetic above, because `put` runs it for
+/// every cell of every shaded frame.
+static SHADE_K: [u16; 96] = {
+    let mut t = [0u16; 96];
+    let mut i = 0;
+    while i < 96 {
+        let ink = INK[i] as u32;
+        t[i] = (SHADE_LEVEL_Q * (100 - SHADE_INK_BIAS_PCT * ink / 100) / 100) as u16;
+        i += 1;
+    }
+    t
+};
+
+/// The scale a glyph's own background is taken at. `shade` is the whole of it;
+/// this is exposed so a caller drawing many cells of one glyph can hoist it.
+#[inline]
+pub fn shade_k(ch: u8) -> u32 {
+    SHADE_K[if ch < 32 || ch >= 128 { 0 } else { (ch - 32) as usize }] as u32
+}
+
+/// **The colour of the gaps around a glyph**, given the surface colour that
+/// glyph was drawn in.
+///
+/// This is the whole of the shaded look in one function: the cell keeps the
+/// colour the renderer already chose for it, and the part of the cell the glyph
+/// does not cover gets a dimmer, slightly greyer version of the same colour
+/// instead of black. Hue is very nearly preserved — the same reason `dim_rgb`
+/// scales rather than blends — so a cell reads as one surface at one colour,
+/// not as ink of one colour over a wash of another.
+///
+/// The result is quantised to multiples of four. A background is a dim colour
+/// and four counts of 255 is invisible there, but it turns a smooth gradient
+/// into runs of equal cells, and the ANSI writer emits one escape per run.
+#[inline]
+pub fn shade(c: [u8; 3], ch: u8) -> [u8; 3] {
+    shade_at(c, shade_k(ch))
+}
+
+#[inline]
+pub fn shade_at(c: [u8; 3], k: u32) -> [u8; 3] {
+    let m = (c[0] as u32 + c[1] as u32 + c[2] as u32) / 3;
+    let one = |v: u8| -> u8 {
+        let v = (v as u32 * (100 - SHADE_DESAT_PCT) + m * SHADE_DESAT_PCT) / 100;
+        ((((v * k) >> 10) as u8) & !3) as u8
+    };
+    [one(c[0]), one(c[1]), one(c[2])]
+}

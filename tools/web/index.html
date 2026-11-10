@@ -38,7 +38,7 @@
     <span>grid <b id="grid">-</b> · cells kept <b id="hits">-</b></span>
     <span>sim <b id="ms">-</b> · render <b id="rms">-</b> · paint <b id="dms">-</b> ms · <b id="fps">-</b> fps</span>
     <span class="k"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move · mouse look ·
-      <kbd>shift</kbd> run · <kbd>V</kbd> vista · <kbd>E</kbd>/<kbd>C</kbd> rise/sink · <kbd>esc</kbd> release</span>
+      <kbd>shift</kbd> run · <kbd>V</kbd> vista · <kbd>B</kbd> shaded cells · <kbd>E</kbd>/<kbd>C</kbd> rise/sink · <kbd>esc</kbd> release</span>
   </div>
 </div>
 <div id="splash">
@@ -83,10 +83,14 @@ function resize() {
 addEventListener('resize', resize);
 
 const keys = new Set();
+// Shaded cells, as `--shade` and the `B` key do in the terminal build. Off to
+// start with, the same way the native binary starts.
+let shaded = false;
 let lookX = 0, lookY = 0;
 addEventListener('keydown', (e) => {
   keys.add(e.code);
   if (e.code === 'KeyV' && ready) wasm.ac_toggle_vista();
+  if (e.code === 'KeyB' && ready) { shaded = !shaded; wasm.ac_set_shading(shaded ? 1 : 0); }
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
 });
 addEventListener('keyup', (e) => keys.delete(e.code));
@@ -119,9 +123,9 @@ const batches = new Map();
 function paint(buf, bg) {
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, canvas.clientWidth, canvas.clientHeight);
-  // Registration plates are the one thing in the frame with a background of
-  // its own — black on yellow at the back of a car, black on white at the
-  // front. `bg` is null on any frame that painted none, which is most of them.
+  // The background plane: the colour of the part of each cell its glyph does
+  // not cover. `bg` is null on a frame drawn with shading off, which writes no
+  // background at all, and then nothing here runs.
   if (bg) {
     for (let y = 0; y < rows; y++) {
       let x = 0;
@@ -140,16 +144,9 @@ function paint(buf, bg) {
     }
   }
   batches.clear();
-  // A registration is set heavy, the way the native terminal build sets it
-  // with SGR 1 — at one character per cell weight is the only size there is.
-  // The cells that get it are the cells over a panel and nothing else, so it
-  // rides on the same flag the yellow does and the whole branch disappears on
-  // a frame with no plate on it.
-  const heavy = [];
   for (let i = 0, n = cols * rows; i < n; i++) {
     const code = buf[i * 4];
     if (code === 32 || code === 0) continue;
-    if (bg && (bg[i * 3] | bg[i * 3 + 1] | bg[i * 3 + 2])) { heavy.push(i, code); continue; }
     const key = (buf[i*4+1] << 16) | (buf[i*4+2] << 8) | buf[i*4+3];
     let arr = batches.get(key);
     if (!arr) batches.set(key, arr = []);
@@ -166,23 +163,6 @@ function paint(buf, bg) {
     ctx.fillStyle = '#' + key.toString(16).padStart(6, '0');
     draw(arr);
   }
-  if (heavy.length) {
-    ctx.save();
-    ctx.font = '900 ' + ctx.font;
-    ctx.fillStyle = '#000';
-    // Canvas has no font-weight synthesis to fall back on when the monospace
-    // face ships no black weight, so thicken the outline as well — the same
-    // belt and braces the SVG writer uses.
-    ctx.strokeStyle = '#000';
-    ctx.lineWidth = Math.max(0.6, cellH * 0.05);
-    for (let j = 0; j < heavy.length; j += 2) {
-      const i = heavy[j], ch = String.fromCharCode(heavy[j + 1]);
-      const x = (i % cols) * cellW, y = ((i / cols | 0) + 1) * cellH - cellH * 0.18;
-      ctx.strokeText(ch, x, y);
-    }
-    draw(heavy);
-    ctx.restore();
-  }
 }
 
 let last = 0, fpsT = 0, fpsN = 0, simA = 0, rndA = 0, drawA = 0;
@@ -198,7 +178,7 @@ function frame(now) {
   const t2 = performance.now();
   paint(
     new Uint8Array(mem.buffer, wasm.ac_frame_ptr(), cols * rows * 4),
-    wasm.ac_has_panels() ? new Uint8Array(mem.buffer, wasm.ac_bg_ptr(), cols * rows * 3) : null,
+    wasm.ac_has_bg() ? new Uint8Array(mem.buffer, wasm.ac_bg_ptr(), cols * rows * 3) : null,
   );
   const t3 = performance.now();
 

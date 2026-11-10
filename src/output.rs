@@ -9,26 +9,22 @@ use std::fmt::Write as _;
 /// A 180x80 frame is ~14k cells; emitting a colour per cell would be ~280 KB
 /// of escape codes a frame and no terminal keeps up with that.
 ///
-/// The background plane is handled the same way and costs a compare per cell:
-/// black is the default background, so while `bg` is black — which is all of a
-/// frame except the registration plates — not one extra byte is emitted.
+/// The background plane is written the same way, run by run: `SGR 48;2` only
+/// where the background colour actually changes, and `SGR 49` back to the
+/// terminal's own black wherever it goes black. A frame drawn with shading off
+/// never writes a background at all, so `has_bg` is false and not one extra
+/// byte is emitted — which is why the plain look costs what it always did.
 ///
-/// Panel cells are also emitted BOLD (`SGR 1`) and returned to normal intensity
-/// (`SGR 22`) on the way out. That is how a registration is set in heavy type
-/// in a terminal: at one character per cell there is no larger size to go to,
-/// so weight is the only axis left. It rides entirely on the panel flag — a
-/// panel is only ever a plate — so it needs no attribute plane of its own and
-/// costs nothing on a frame without one. The caveat worth knowing: a terminal
-/// still on the legacy 16-colour path may render bold as *bright* rather than
-/// heavy, which on a black foreground lifts it toward grey. Anything able to
-/// honour the 24-bit colour this writer emits in the first place picks a
-/// heavier face instead, which is what is wanted.
+/// With shading on the background IS most of the frame, and the cost is the
+/// escape sequences, not the compare. That is why `palette::shade` quantises:
+/// backgrounds that agree to within four counts of 255 come out byte-identical
+/// and collapse into one run.
 pub fn grid_to_ansi(g: &Grid, out: &mut String) {
     out.clear();
     // Two bodies rather than a test per cell: this is the paint loop, and a
-    // frame with no plates on it must cost exactly what it cost before there
-    // were any.
-    if g.has_panels {
+    // frame with no background on it must cost exactly what it cost before
+    // there was a background plane.
+    if g.has_bg {
         ansi_rows::<true>(g, out);
     } else {
         ansi_rows::<false>(g, out);
@@ -36,7 +32,7 @@ pub fn grid_to_ansi(g: &Grid, out: &mut String) {
     out.push_str("\x1b[0m");
 }
 
-fn ansi_rows<const PANELS: bool>(g: &Grid, out: &mut String) {
+fn ansi_rows<const BG: bool>(g: &Grid, out: &mut String) {
     for y in 0..g.rows {
         let _ = write!(out, "\x1b[{};1H", y + 1);
         let mut last: i32 = -1;
@@ -49,19 +45,13 @@ fn ansi_rows<const PANELS: bool>(g: &Grid, out: &mut String) {
                 let _ = write!(out, "\x1b[38;2;{r};{gg};{b}m");
                 last = key;
             }
-            if PANELS {
+            if BG {
                 let (br, bgg, bb) = (g.bg[i * 3], g.bg[i * 3 + 1], g.bg[i * 3 + 2]);
                 let bkey = ((br as i32) << 16) | ((bgg as i32) << 8) | bb as i32;
                 if bkey != last_bg {
-                    // Crossing into or out of a panel is also where the weight
-                    // changes. Both ends of a plate are edge cells, so the bold
-                    // run is the panel and nothing else on the frame.
                     if bkey == 0 {
-                        out.push_str("\x1b[22;49m");
+                        out.push_str("\x1b[49m");
                     } else {
-                        if last_bg == 0 {
-                            out.push_str("\x1b[1m");
-                        }
                         let _ = write!(out, "\x1b[48;2;{br};{bgg};{bb}m");
                     }
                     last_bg = bkey;
@@ -69,11 +59,10 @@ fn ansi_rows<const PANELS: bool>(g: &Grid, out: &mut String) {
             }
             out.push(if g.ch[i] == 0 { ' ' } else { g.ch[i] as char });
         }
-        // `\x1b[K` clears with the CURRENT background, so a row that ended
-        // inside a panel would paint the rest of the line yellow — and the
-        // weight has to come off with it, or the next row starts bold.
-        if PANELS && last_bg != 0 {
-            out.push_str("\x1b[22;49m");
+        // `\x1b[K` clears with the CURRENT background, so a row that ended on
+        // a shaded cell would paint the rest of the line that colour.
+        if BG && last_bg != 0 {
+            out.push_str("\x1b[49m");
         }
         let _ = write!(out, "\x1b[K");
     }
@@ -133,11 +122,11 @@ font-size=\"{:.1}\" font-weight=\"700\">\n",
         pitch / 4.0
     );
 
-    // Panels first, under everything, so a plate's yellow never sits on top of
-    // its own characters. Runs of one colour, and skipped entirely while the
-    // background is black — which is every cell of a frame with no plates in it.
+    // The background plane first, under everything, so a cell's own glyph is
+    // never sat on by its own background. Runs of one colour, and skipped
+    // entirely on a frame drawn with shading off — which has no background.
     for y in 0..g.rows {
-        if !g.has_panels {
+        if !g.has_bg {
             break;
         }
         let mut x = 0usize;
@@ -173,24 +162,19 @@ font-size=\"{:.1}\" font-weight=\"700\">\n",
     for y in 0..g.rows {
         let mut run = String::new();
         let mut run_color = String::new();
-        let mut run_bold = false;
         let mut run_start = 0usize;
         for x in 0..g.cols {
             let i = y * g.cols + x;
             let c = format!("#{:02x}{:02x}{:02x}", g.rgb[i * 3], g.rgb[i * 3 + 1], g.rgb[i * 3 + 2]);
-            // A cell over a panel is part of a registration, and a registration
-            // is set heavy — the same call the ANSI writer makes with `SGR 1`.
-            let bold = g.has_panels && g.bg[i * 3] | g.bg[i * 3 + 1] | g.bg[i * 3 + 2] != 0;
-            if c != run_color || bold != run_bold || run.is_empty() {
-                flush_run(&mut s, &run, &run_color, run_bold, run_start, y, CW, CH);
+            if c != run_color || run.is_empty() {
+                flush_run(&mut s, &run, &run_color, run_start, y, CW, CH);
                 run.clear();
                 run_color = c;
-                run_bold = bold;
                 run_start = x;
             }
             run.push(if g.ch[i] == 0 { ' ' } else { g.ch[i] as char });
         }
-        flush_run(&mut s, &run, &run_color, run_bold, run_start, y, CW, CH);
+        flush_run(&mut s, &run, &run_color, run_start, y, CW, CH);
     }
     let _ = write!(s, "<rect width=\"{w}\" height=\"{h}\" fill=\"url(#sl)\"/>\n");
     let _ = write!(s, "<rect width=\"{w}\" height=\"{h}\" fill=\"url(#vg)\"/>\n");
@@ -198,22 +182,17 @@ font-size=\"{:.1}\" font-weight=\"700\">\n",
     s
 }
 
-/// One run of same-coloured characters. `bold` is set for the cells of a
-/// registration plate and nothing else.
+/// One run of same-coloured characters.
 ///
-/// Weight is asked for twice, on purpose. `font-weight: 900` is the correct
-/// request, but it is only honoured if the monospace face the viewer happens to
-/// resolve actually SHIPS a black weight, and most do not — the run then comes
-/// back identical to the 700 the document is already set in and the plate is
-/// not bold at all. The hairline stroke in the fill's own colour is the part
-/// that cannot be ignored: it thickens the glyph outline itself, in any face.
-/// `paint-order="stroke"` puts it behind the fill so the counters in `8`, `B`
-/// and `0` stay open instead of filling in.
+/// There is no weight axis here any more. It existed for one thing — a
+/// registration plate was once black characters on a painted yellow panel, and
+/// a registration is set heavy — and a plate has been drawn out of ordinary
+/// characters since. The background plane is a surface colour now, not a
+/// panel, so a cell having one says nothing about what is written on it.
 fn flush_run(
     s: &mut String,
     run: &str,
     colour: &str,
-    bold: bool,
     start: usize,
     y: usize,
     cw: usize,
@@ -222,20 +201,14 @@ fn flush_run(
     if run.trim().is_empty() {
         return;
     }
-    let weight = if bold {
-        format!(" font-weight=\"900\" paint-order=\"stroke\" stroke=\"{colour}\" stroke-width=\"0.9\"")
-    } else {
-        String::new()
-    };
     let _ = write!(
         s,
-        "<text x=\"{}\" y=\"{}\" textLength=\"{}\" lengthAdjust=\"spacing\" fill=\"{}\"{} \
+        "<text x=\"{}\" y=\"{}\" textLength=\"{}\" lengthAdjust=\"spacing\" fill=\"{}\" \
 xml:space=\"preserve\">{}</text>\n",
         start * cw,
         y * ch + ch - 3,
         run.chars().count() * cw,
         colour,
-        weight,
         esc(run)
     );
 }

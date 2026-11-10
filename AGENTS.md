@@ -575,12 +575,14 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   read it: the rain pass (a drop through a registration reads as a different
   registration), `--plate-shot`, and
   `a_plate_on_screen_is_never_a_registration_other_than_its_own`.
-- **`Grid`'s background colour plane is now UNUSED.** It existed for one thing —
-  black characters on yellow — and that thing is gone. It costs nothing while it
-  is black (`has_panels` is false on every frame, so all three output paths skip
-  it), so it was left rather than torn out of ANSI, SVG and the wasm ABI in the
-  same breath as a change to how a plate looks. Bold went with it: weight came
-  off the panel flag, and there is no panel.
+- **`Grid`'s background colour plane is what SHADED CELLS fill.** It existed for
+  one thing — black characters on yellow — and when that went it sat unused,
+  left in place rather than torn out of ANSI, SVG and the wasm ABI. `--shade`
+  is what uses it now (`docs/shaded-cells.md`). The flag is `Grid::has_bg`
+  (it was `has_panels`), false on every plain frame, and all three output paths
+  still skip the plane entirely while it is. Bold went with the panel: weight
+  came off the panel flag, there is no panel, and the dead weight path is gone
+  from all three frontends.
 - **Plates are drawn in a SECOND pass, after every vehicle body is in the depth
   buffer, and they are all-or-nothing.** Both rules are load-bearing and both
   were put there by an observed failure, not by caution: a plate clipped by a
@@ -641,8 +643,9 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   canvas. There is no panel now, so there is no bold, and the plate reads by its
   SHAPE instead: a rectangle closed on all sides is a stronger "this is an
   object" signal than weight ever was at one character per cell.
-- `--plate-shot` is the evidence tool. It scores frames on the background plane
-  — nothing but a plate ever paints one — and prints which registrations from
+- `--plate-shot` is the evidence tool. It scores frames on `Grid::plate` — the
+  plate plane, NOT the background plane, which is a surface colour now — and
+  prints which registrations from
   whatever list is actually on the road (`eng.pop.plates`, not the raw
   `--plates` argv) appear on the frame, which is the honest legibility check.
   "Appear" means any of the three settings of `Plate::settings`, not the tight

@@ -123,26 +123,33 @@ pub struct Grid {
     pub rows: usize,
     pub ch: Vec<u8>,
     pub rgb: Vec<u8>,
-    /// Background colour, 3 bytes a cell, `[0,0,0]` everywhere the frame is
-    /// simply drawn on black — which is almost all of it.
+    /// **The background colour plane**: 3 bytes a cell, `[r, g, b]`, the colour
+    /// of the part of the cell the glyph does not cover.
     ///
-    /// It exists for exactly one thing: a registration plate is black
-    /// characters ON yellow, and that is not something a foreground colour can
-    /// say. Both output paths skip it while it is black, so a frame with no
-    /// plates in it costs what it always did.
+    /// It was built for one thing — a registration plate used to be black
+    /// characters ON yellow — and then sat unused when a plate became drawn
+    /// characters like everything else. `shade` is what fills it now: every
+    /// surface on the frame puts a dimmed version of its own colour here, so
+    /// the gaps between glyphs are the surface instead of black. While shading
+    /// is off nothing writes it, `has_bg` stays false, and all three output
+    /// paths skip the plane entirely — which is why the plain look costs
+    /// exactly what it always did.
     pub bg: Vec<u8>,
-    /// Whether anything on this frame actually painted one. While it is false
-    /// both output paths skip the background entirely and `put` does not
-    /// bother clearing it, so a run with `--no-plates` costs exactly what it
-    /// cost before plates existed.
+    /// Whether anything on this frame actually wrote a background. While it is
+    /// false both output paths skip the background plane entirely and `put`
+    /// does not bother clearing it, so a frame drawn with shading off costs
+    /// what it cost before there was a background at all.
+    pub has_bg: bool,
+    /// **Shaded cells on or off** — the mode, held on the grid because the
+    /// grid is the thing that has a background plane.
     ///
-    /// **Nothing sets it any more.** A plate used to be the one thing on the
-    /// frame that painted a background; it is drawn out of characters now, so
-    /// this is false on every frame and the plane is skipped everywhere. It is
-    /// left in place — and costs nothing while it is black — rather than being
-    /// torn out of the ANSI, SVG and wasm paths in the same breath as a change
-    /// to how a plate looks.
-    pub has_panels: bool,
+    /// Off, every `put` is exactly the `put` it has always been and nothing
+    /// touches `bg`: the glyph plane, the colour plane and the depth buffer
+    /// come out bit-identical to the build before shading existed, which is
+    /// what `shading_only_adds_a_colour_plane` asserts. On, the same glyphs in
+    /// the same colours are drawn over a background of the surface they belong
+    /// to. Shading never changes WHICH character is drawn anywhere.
+    pub shade: bool,
     /// **Which cells are part of a registration plate.** One byte a cell, and
     /// only touched on a frame that drew one.
     ///
@@ -166,7 +173,8 @@ impl Grid {
             ch: vec![b' '; cols * rows],
             rgb: vec![0; cols * rows * 3],
             bg: vec![0; cols * rows * 3],
-            has_panels: false,
+            has_bg: false,
+            shade: false,
             plate: vec![0; cols * rows],
             has_plates: false,
             depth: vec![f32::INFINITY; cols * rows],
@@ -177,15 +185,17 @@ impl Grid {
         if cols == self.cols && rows == self.rows {
             return;
         }
+        let shade = self.shade;
         *self = Grid::new(cols, rows);
+        self.shade = shade;
     }
 
     fn clear(&mut self) {
         self.ch.fill(b' ');
         self.rgb.fill(0);
-        if self.has_panels {
+        if self.has_bg {
             self.bg.fill(0);
-            self.has_panels = false;
+            self.has_bg = false;
         }
         if self.has_plates {
             self.plate.fill(0);
@@ -208,14 +218,74 @@ impl Grid {
         self.rgb[i * 3] = rgb[0];
         self.rgb[i * 3 + 1] = rgb[1];
         self.rgb[i * 3 + 2] = rgb[2];
-        if self.has_panels {
-            self.bg[i * 3] = 0;
-            self.bg[i * 3 + 1] = 0;
-            self.bg[i * 3 + 2] = 0;
+        if self.shade {
+            // The gaps around this glyph are the surface it is drawn on, a
+            // third as bright. One branch, predicted the same way on every cell
+            // of a frame, and nothing at all while the mode is off.
+            let s = crate::palette::shade(rgb, ch);
+            self.bg[i * 3] = s[0];
+            self.bg[i * 3 + 1] = s[1];
+            self.bg[i * 3 + 2] = s[2];
+            self.has_bg = true;
         }
         if self.has_plates {
             self.plate[i] = 0;
         }
+    }
+
+    /// **The background alone, where no glyph is drawn.**
+    ///
+    /// A surface pass skips a cell whenever its texture comes out blank — the
+    /// empty end of the wall ramp, the unpainted half of a road marking, the
+    /// two thirds of a distant facade deliberately left dark. Those cells are
+    /// most of what reads as a hole in a complex frame, and they are the ones
+    /// shading is for. This writes the surface colour into the background
+    /// plane and touches nothing else: not the glyph, not the colour plane and
+    /// not the depth buffer, because no glyph was drawn and a cell with no
+    /// glyph in it has never occluded anything.
+    ///
+    /// **A cell that has a character on it keeps that character's own
+    /// background, and this will not take it.** A blank in this renderer means
+    /// "see through to whatever is behind", not "an opaque black hole" — a
+    /// facade too dark to draw lets the tower behind it through, and always
+    /// has. So the surface a cell is painted in has to be the surface the
+    /// character on it came from, or the two disagree and the character floats
+    /// over a colour that is not its own. The depth test is the same one `put`
+    /// makes, against the same buffer.
+    #[inline]
+    fn put_bg(&mut self, x: i32, y: i32, rgb: [u8; 3], d: f32) {
+        if !self.shade || x < 0 || y < 0 || x >= self.cols as i32 || y >= self.rows as i32 {
+            return;
+        }
+        let i = y as usize * self.cols + x as usize;
+        if self.ch[i] != b' ' || d > self.depth[i] {
+            return;
+        }
+        let s = crate::palette::shade(rgb, b' ');
+        self.bg[i * 3] = s[0];
+        self.bg[i * 3 + 1] = s[1];
+        self.bg[i * 3 + 2] = s[2];
+        self.has_bg = true;
+    }
+
+    /// One whole row of background, shaded once and written straight in.
+    ///
+    /// The sky is the one surface that is the same colour all the way across a
+    /// row and is drawn before anything else, so it needs neither a per-cell
+    /// shade nor a depth test — and it covers up to half the frame, which is
+    /// exactly where neither is worth paying for.
+    fn bg_row(&mut self, y: i32, rgb: [u8; 3]) {
+        if !self.shade || y < 0 || y >= self.rows as i32 {
+            return;
+        }
+        let s = crate::palette::shade(rgb, b' ');
+        let row = y as usize * self.cols;
+        for i in row..row + self.cols {
+            self.bg[i * 3] = s[0];
+            self.bg[i * 3 + 1] = s[1];
+            self.bg[i * 3 + 2] = s[2];
+        }
+        self.has_bg = true;
     }
 
     /// Is this cell part of a plate?
@@ -458,6 +528,16 @@ impl Renderer {
     /// so they hold still while you turn under them.
     fn sky(&mut self, g: &mut Grid, cam: &Camera, proj: &Projection, t: f32) {
         let sky_rows = (proj.horizon.ceil() as i32).clamp(0, proj.rows as i32);
+        // **The sky, as a surface.** Unshaded it is black with stars on it,
+        // which is right for a sky and is also why the horizon has no edge:
+        // black city against black sky. Shaded it gets the gradient a night
+        // sky over a lit city actually has — the glow the streets throw up
+        // into it near the horizon, deep blue well above — and the skyline
+        // reads as a silhouette against something.
+        for y in 0..sky_rows {
+            let t = (1.0 - ((proj.horizon - y as f32) / 40.0).clamp(0.0, 1.0)).powi(2);
+            g.bg_row(y, hsl(220.0 - 14.0 * t, 62.0 - 16.0 * t, 7.0 + 30.0 * t));
+        }
         for x in 0..proj.cols {
             let dir_angle = cam.yaw + proj.col_tan[x].atan();
             let key_x = (480.0 * dir_angle) as i32;
@@ -538,6 +618,8 @@ impl Renderer {
                 let (glyph, colour) = ground_glyph(&c, wx, wz, cx, cz, d, scale);
                 if glyph != b' ' {
                     g.put(x as i32, y, glyph, colour, d);
+                } else {
+                    g.put_bg(x as i32, y, colour, d);
                 }
             }
         }
@@ -876,10 +958,19 @@ impl Renderer {
         let doorway = c.door >= 5 && door_row <= r1;
         let bld = if c.plan != 0 && sf_row <= r1 { Some(building_of(hit.cell_x, hit.cell_z, c.plan, BLOCK, grain)) } else { None };
         let sign = billboard_on(proj, hit, h, hue, wall_pos);
+        // The wall where it is too dark to draw anything on. Hoisted, because
+        // a facade that falls under the brightness floor falls under it for
+        // most of its span, and this is the colour every one of those cells
+        // wants. Unshaded it is never looked at.
+        let unlit = if g.shade { hsl(hue, sat * 0.6, 7.0 + 5.0 * base_b) } else { [0, 0, 0] };
 
         for y in r0..=r1 {
             let b = base_b * v_profile(y - r0, span);
             if b < 0.05 {
+                // Nothing is drawn here, and that is most of a far facade.
+                // Shaded, it is still a wall: give it the wall's colour at the
+                // bottom of the range rather than a hole in the building.
+                g.put_bg(x, y, unlit, hit.dist);
                 continue;
             }
             let wy = proj.height_at(y as usize, hit.dist);
@@ -1084,7 +1175,9 @@ impl Renderer {
                     colour = hsl(hue, sat, 38.0 + 26.0 * b);
                 }
             }
-            if glyph != b' ' {
+            if glyph == b' ' {
+                g.put_bg(x, y, colour, hit.dist);
+            } else {
                 g.put(x, y, glyph, colour, hit.dist);
                 // **Only a board that actually made it on to the screen.** The
                 // wall pass marches near to far, and a facade BEHIND a nearer
@@ -1288,6 +1381,8 @@ impl Renderer {
                                 floor_glyph(room, &c, wx, wz, cx, cz, scale, b + pool);
                             if glyph != b' ' {
                                 g.put(x as i32, y, glyph, colour, d);
+                            } else {
+                                g.put_bg(x as i32, y, colour, d);
                             }
                         }
                     }
@@ -1316,6 +1411,8 @@ impl Renderer {
                 let (glyph, colour) = ground_glyph(&c, wx, wz, cx, cz, d, scale);
                 if glyph != b' ' {
                     g.put(x as i32, y, glyph, dim_rgb(colour, OUTSIDE_DIM), d);
+                } else {
+                    g.put_bg(x as i32, y, dim_rgb(colour, OUTSIDE_DIM), d);
                 }
             }
         }
@@ -1470,6 +1567,8 @@ impl Renderer {
                         surface_of(room, &c, y, r0, r1, along, cw, ch, wy, sn, b, hue, sat, glow);
                     if glyph != b' ' {
                         g.put(x as i32, y, glyph, colour, hit.dist);
+                    } else {
+                        g.put_bg(x as i32, y, colour, hit.dist);
                     }
                 }
             }
@@ -1762,10 +1861,12 @@ impl Renderer {
             } else if n > 0.3 {
                 (b'.', hsl(hue, 20.0, 8.0 + 12.0 * b))
             } else {
-                (b' ', [0, 0, 0])
+                (b' ', hsl(hue, 18.0, 7.0 + 10.0 * b))
             };
             if glyph != b' ' {
                 g.put(x, y, glyph, colour, d);
+            } else {
+                g.put_bg(x, y, colour, d);
             }
         }
         top
@@ -1827,6 +1928,14 @@ impl Renderer {
             } else if n > 0.34 {
                 g.put(x, y, if n > 0.72 { b':' } else { b'.' },
                       hsl(hue, (0.42 * c.sat as f32).max(18.0), 7.0 + 24.0 * dim), hit.dist);
+            } else {
+                // **The two thirds of a far facade left blank.** On black that
+                // is what makes a distant tower read as a lit grid rather than
+                // a slab, and it is also why the far skyline has no mass at
+                // all. Shaded, the blank cells carry the building instead of
+                // the sky behind it, so a tower is a silhouette with lit
+                // windows in it.
+                g.put_bg(x, y, hsl(hue, (0.42 * c.sat as f32).max(18.0), 5.0 + 16.0 * dim), hit.dist);
             }
         }
         r0
@@ -2697,7 +2806,9 @@ fn ground_glyph(c: &Cell, wx: f32, wz: f32, cx: i32, cz: i32, d: f32, scale: f32
     let m = c.cross as i32;
 
     let mut glyph = b' ';
-    let mut colour = [0u8; 3];
+    // Every arm sets a colour, including for the cells it leaves blank: a
+    // blank cell is still a piece of ground, and shading needs to know which.
+    let mut colour;
     match c.surface {
         surface::ROADWAY => {
             glyph = if b > 0.5 { b'-' } else if b > 0.28 { b'_' } else { b'.' };
@@ -2747,6 +2858,10 @@ fn ground_glyph(c: &Cell, wx: f32, wz: f32, cx: i32, cz: i32, d: f32, scale: f32
             }
         }
         surface::PAINTED => {
+            // The unpainted half of a marking is still ROAD, and a shaded cell
+            // needs to know what it is even where there is no glyph on it —
+            // otherwise a crossing reads as a row of holes in the carriageway.
+            colour = hsl(210.0, 18.0, 30.0 + 28.0 * b);
             let on = if fine {
                 ((2.0 * lane) as i32).rem_euclid(2) == 0
             } else {

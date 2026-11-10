@@ -60,10 +60,10 @@ builds the same binary straight onto your `$PATH` as `asciicity`.
 | `W` `A` `S` `D` / arrows | walk and strafe | `J` `K` | turn |
 | `R` `F` | look up / down | space or shift | sprint |
 | `E` `C` / PgUp PgDn | rise / sink | `V` | street ↔ elevated vista |
-| `T` | weather: clear / rain / downpour | `Tab` | lock a walk on |
-| `X` or Enter | act on what is in reach — the lift panel | `M` | hand over to the autopilot |
+| `T` | weather: clear / rain / downpour | `B` | [shaded cells](docs/shaded-cells.md) on / off |
+| `Tab` | lock a walk on | `M` | hand over to the autopilot |
+| `X` or Enter | act on what is in reach — the lift panel | `P` | write the frame to disk |
 | `N` | the nearest lift: which building, which way, how far | `L` | ride mode: let a lift run itself |
-| `P` | write the frame to disk | | |
 | `Q` or Esc | quit | | |
 
 One press of `X` in a lift **commits the car to the whole journey** and lets go
@@ -90,6 +90,10 @@ Every one of these is a real frame out of the engine, same seed, same city.
 
 ![the city in a downpour](docs/frames/city-rain.png)
 
+**[Shaded cells](docs/shaded-cells.md) (`--shade`, or `B`): the same frame with a colour behind every glyph instead of black.**
+
+![shaded cells](docs/shading.png)
+
 ## Examples
 
 ```bash
@@ -104,6 +108,7 @@ Every one of these is a real frame out of the engine, same seed, same city.
 ./play --wayfind --landmark --out shots       # find a lift building, and walk to it
 ./play --drivethru --out shots                # the drive-through: hatch, bay, a car that stops
 ./play --film --weather rain --out frames     # every tick, ready for ffmpeg
+./play --shade                                # shaded cells: no black gaps between the glyphs
 ./play --bench                                # per-frame cost: sim / cast / render / paint
 ```
 
@@ -131,6 +136,7 @@ Every one of these is a real frame out of the engine, same seed, same city.
 | [Doors, rooms and windows](docs/interiors.md) | how inside and outside are one mode, and how you see out |
 | [A glass lift](docs/lift.md) | which buildings get one, the panel, and the floors going past |
 | [Finding your way](docs/wayfinding.md) | names on facades, the seventh silhouette, and the `N` pointer |
+| [Shaded cells](docs/shaded-cells.md) | `--shade`: giving every cell a background colour so a crowded frame reads as a picture |
 | [Registration plates](docs/registration-plates.md) | drawn out of characters, sized to the registration, honest at distance — the idea came from [regtransfers.co.uk](https://www.regtransfers.co.uk/) |
 | [Weather and what is on the pavement](docs/weather-and-streets.md) | rain, the drive-through, pylon signs, stars, lamps, trees |
 | [Recording a film](docs/film.md) | `--film`, the script format, the ffmpeg pipeline |

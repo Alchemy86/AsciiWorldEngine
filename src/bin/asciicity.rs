@@ -45,6 +45,10 @@ struct Args {
     /// means nobody supplied a list and the seed generates one.
     plates: Vec<String>,
     plates_on: bool,
+    /// Shaded cells: every cell gets the colour of the surface behind its
+    /// glyph, not just the glyph. Off by default — it is a different look,
+    /// not a fix, and `B` flips it while you are standing there.
+    shade: bool,
     /// How much the facade generator may vary between neighbours, 0..1.
     /// One is the look this city has always had.
     variety: f32,
@@ -81,6 +85,7 @@ fn main() {
         weather: asciicity::entities::Weather::Clear,
         plates: Vec::new(),
         plates_on: true,
+        shade: false,
         variety: 1.0,
         script: None,
         fps: 30.0,
@@ -160,6 +165,8 @@ fn main() {
                 }
             }
             "--no-plates" => a.plates_on = false,
+            "--shade" | "--shaded" => a.shade = true,
+            "--no-shade" => a.shade = false,
             "--variety" => a.variety = next(&mut i).parse().unwrap_or(a.variety).clamp(0.0, 1.0),
             "--at" => {
                 let v = next(&mut i);
@@ -235,6 +242,10 @@ fn help() {
              how far. A pointer, not a map — the city has no edge, so\n      \
              wandering is not a plan\n  \
            T                  weather: clear / rain / downpour\n  \
+           B                  shaded cells on / off. Every cell gets the\n      \
+             colour of the surface behind its glyph instead of black, so a\n      \
+             crowded frame reads as a picture rather than as sparse\n      \
+             characters with holes between them. --shade starts it on\n  \
            Tab                lock a walk on, so you can look around while moving\n  \
            M                  hand over to the autopilot (any other key takes back)\n  \
            P                  write the frame to disk\n  \
@@ -273,6 +284,11 @@ fn help() {
              a long sightline. Two runs that differ in --variety or --seed are\n      \
              only comparable if they are pictures of the same place.\n  \
            --weather clear|rain|downpour\n  \
+           --shade            draw with shaded cells: the part of every cell\n      \
+             its glyph does not cover is painted in a dimmed version of that\n      \
+             surface's own colour, instead of being left black. Off by default,\n      \
+             and `B` flips it live. It changes no character on the frame —\n      \
+             only what is behind them\n  \
            --indoors          bench from inside a room instead of on the\n      \
              street. Both are real frames and they do not cost the same.\n  \
            --lift-bench       bench from inside a MOVING lift car. A third\n      \
@@ -317,6 +333,7 @@ fn make(a: &Args, cols: usize, rows: usize) -> Engine {
     let mut e = Engine::with_variety(cols, rows, CELL_W, CELL_H, a.seed, a.variety);
     e.set_weather(a.weather);
     e.set_plates_on(a.plates_on);
+    e.set_shading(a.shade);
     if !a.plates.is_empty() {
         let (plates, dropped) = asciicity::palette::Plates::from_list(&a.plates);
         if dropped > 0 {
@@ -426,6 +443,12 @@ fn play(a: &Args, demo: bool, ride: bool) {
         }
         if kb.tapped(b't' as u32) {
             note = format!("  weather: {}", eng.cycle_weather());
+        }
+        if kb.tapped(b'b' as u32) {
+            note = format!(
+                "  shaded cells: {}",
+                if eng.toggle_shading() { "on" } else { "off" }
+            );
         }
         // **Where is the nearest lift?** A pointer, not a map and not a
         // teleport: it names the building, says which way it lies and roughly

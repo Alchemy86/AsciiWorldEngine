@@ -615,6 +615,33 @@ impl Engine {
         self.pop.plates_on = on;
     }
 
+    /// **Shaded cells on or off.**
+    ///
+    /// Off — the default, and what every frame in `docs/` was shot with — a
+    /// cell is a coloured glyph on black and the gaps between glyphs are the
+    /// terminal's own background. On, every surface also writes the part of
+    /// the cell its glyph does not cover, in a dimmed version of that
+    /// surface's own colour, so a complex frame reads as a shaded picture
+    /// rather than as sparse characters with holes between them.
+    ///
+    /// It is a switch and not a replacement: the glyph plane and the colour
+    /// plane come out identical either way, so nothing that reads a frame's
+    /// characters — the plate tests, `--plate-shot`, `--wayfind` — sees any
+    /// difference at all.
+    pub fn set_shading(&mut self, on: bool) {
+        self.grid.shade = on;
+    }
+
+    /// Flip it, and say what it landed on — what the `B` key calls.
+    pub fn toggle_shading(&mut self) -> bool {
+        self.grid.shade = !self.grid.shade;
+        self.grid.shade
+    }
+
+    pub fn shading(&self) -> bool {
+        self.grid.shade
+    }
+
     pub fn weather_name(&self) -> &'static str {
         self.sky.weather.name()
     }
@@ -2246,7 +2273,7 @@ mod tests {
             // **Nothing about a plate paints a background any more.** The whole
             // point of drawing it out of characters is that it is made of the
             // same stuff as the rest of the picture.
-            assert!(!e.grid.has_panels, "frame {i}: a plate painted a background");
+            assert!(!e.grid.has_bg, "frame {i}: a plate painted a background");
             for y in 0..e.grid.rows {
                 let mut x = 0;
                 while x < e.grid.cols {
@@ -2791,5 +2818,95 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), all.len(), "only {} of {} families ever occur", seen.len(), all.len());
+    }
+
+    /// **Shading adds a colour plane and changes nothing else.**
+    ///
+    /// This is the whole contract of the mode and the reason it is safe to
+    /// leave every other guardrail alone. The glyph plane and the foreground
+    /// colour plane come out BIT-IDENTICAL with shading on and off, over a
+    /// walk long enough to put cars, plates, signs and rain on the frame — so
+    /// `a_plate_on_screen_is_never_a_registration_other_than_its_own`,
+    /// `--plate-shot`, `--wayfind` and every committed `.txt` evidence frame
+    /// say the same thing in either mode. What shading adds is `bg`, and
+    /// nothing reads `bg` but the three output writers.
+    #[test]
+    fn shading_only_adds_a_colour_plane() {
+        let mut plain = Engine::new(160, 50, 1.0, 2.0, 0xACC17);
+        let mut shaded = Engine::new(160, 50, 1.0, 2.0, 0xACC17);
+        shaded.set_shading(true);
+        assert!(!plain.shading() && shaded.shading());
+        for i in 0..240 {
+            let keys = if (i / 60) % 2 == 0 {
+                camera::key::FWD
+            } else {
+                camera::key::FWD | camera::key::TURN_R
+            };
+            plain.step(1.0 / 60.0, keys, 0.0, 0.0);
+            shaded.step(1.0 / 60.0, keys, 0.0, 0.0);
+            plain.render();
+            shaded.render();
+            assert_eq!(plain.grid.ch, shaded.grid.ch, "frame {i}: shading moved a character");
+            assert_eq!(plain.grid.rgb, shaded.grid.rgb, "frame {i}: shading changed a colour");
+            assert!(!plain.grid.has_bg, "frame {i}: the plain look painted a background");
+            assert!(shaded.grid.has_bg, "frame {i}: the shaded look painted none");
+        }
+    }
+
+    /// **The gaps are what shading is for**, so count them.
+    ///
+    /// The complaint the mode answers is that a glyph covers a fraction of its
+    /// cell and the rest of the cell is nothing, so a crowded frame reads as
+    /// characters with black between them. Most of this frame is already
+    /// INKED — that was never the problem — so the thing to check is that
+    /// nearly every cell on it, inked or blank, now has a surface behind the
+    /// character rather than the terminal's black. And the ink stays the
+    /// bright half of its own cell, which is what keeps the wall ramp meaning
+    /// what it has always meant.
+    #[test]
+    fn a_shaded_frame_is_a_surface_not_a_scattering() {
+        let mut e = Engine::new(160, 50, 1.0, 2.0, 0x5AADE);
+        e.set_shading(true);
+        for _ in 0..90 {
+            e.step(1.0 / 60.0, camera::key::FWD, 0.0, 0.0);
+        }
+        e.render();
+        let cells = e.grid.cols * e.grid.rows;
+        let inked = (0..cells).filter(|&i| e.grid.ch[i] != b' ').count();
+        let covered = (0..cells)
+            .filter(|&i| e.grid.bg[i * 3] | e.grid.bg[i * 3 + 1] | e.grid.bg[i * 3 + 2] != 0)
+            .count();
+        assert!(
+            covered > cells * 3 / 4,
+            "only {covered} of {cells} cells have a surface behind them"
+        );
+        let bare = (0..cells)
+            .filter(|&i| {
+                e.grid.ch[i] == b' '
+                    && e.grid.bg[i * 3] | e.grid.bg[i * 3 + 1] | e.grid.bg[i * 3 + 2] != 0
+            })
+            .count();
+        let blank = cells - inked;
+        assert!(
+            blank > 0 && bare * 5 > blank * 4,
+            "only {bare} of {blank} cells with no character on them got a surface"
+        );
+        // A background never outshines the glyph standing on it: the ink is
+        // the bright half of every cell, which is what keeps the wall ramp
+        // meaning what it has always meant.
+        for i in 0..cells {
+            if e.grid.ch[i] == b' ' {
+                continue;
+            }
+            // On the total, not per channel: a background is slightly greyer
+            // than its ink, so the weakest channel of a saturated colour comes
+            // back a count or two UP. That is the desaturation doing its job.
+            let fg: u32 = (0..3).map(|c| e.grid.rgb[i * 3 + c] as u32).sum();
+            let bg: u32 = (0..3).map(|c| e.grid.bg[i * 3 + c] as u32).sum();
+            assert!(
+                bg * 2 <= fg,
+                "cell {i}: background {bg} against ink {fg} — the gap is not the dimmer half"
+            );
+        }
     }
 }

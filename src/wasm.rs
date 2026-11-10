@@ -57,17 +57,24 @@ pub extern "C" fn ac_frame_len() -> u32 {
     (eng().proj.cols * eng().proj.rows * 4) as u32
 }
 
-/// The background plane: 3 bytes a cell, `[r, g, b]`, row-major, black
-/// everywhere except a registration plate. `ac_has_panels` is zero on a frame
-/// that painted none, and the page skips the whole plane when it is.
+/// The background plane: 3 bytes a cell, `[r, g, b]`, row-major — the colour
+/// of the part of each cell its glyph does not cover. `ac_has_bg` is zero on a
+/// frame drawn with shading off, which writes no background at all, and the
+/// page skips the whole plane when it is.
 #[no_mangle]
 pub extern "C" fn ac_bg_ptr() -> *const u8 {
     eng().grid.bg.as_ptr()
 }
 
 #[no_mangle]
-pub extern "C" fn ac_has_panels() -> u32 {
-    eng().grid.has_panels as u32
+pub extern "C" fn ac_has_bg() -> u32 {
+    eng().grid.has_bg as u32
+}
+
+/// Shaded cells on or off, as `--shade` and the `B` key do natively.
+#[no_mangle]
+pub extern "C" fn ac_set_shading(on: u32) {
+    eng().set_shading(on != 0);
 }
 
 /// Turn registration plates on or off, as `--no-plates` does natively.
