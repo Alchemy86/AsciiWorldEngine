@@ -1,0 +1,18 @@
+[package]
+name = "starry-night"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Van Gogh's The Starry Night as living, flowing coloured ASCII — the second program on the engine"
+license = "PolyForm-Noncommercial-1.0.0"
+authors = ["Aaron Gibson"]
+publish = false
+
+[[bin]]
+name = "starry-night"
+path = "src/main.rs"
+
+[dependencies]
+# The engine and nothing else: no city, and no image crate. The painting is
+# decoded by the small baseline JPEG decoder in src/jpeg.rs.
+ascii-engine = { path = "../../engine", features = ["term"] }

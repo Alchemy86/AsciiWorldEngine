@@ -5,13 +5,16 @@
 # everything a coloured-ASCII program shares and nothing about what it draws.
 # This root package is the city, the first program built on it, and it stays
 # the default: `cargo run` and you are walking the city. No node, no browser,
-# no wasm anywhere on that path.
+# no wasm anywhere on that path. `examples/starry-night/` is the second
+# program, built on the engine alone: `cargo run -p starry-night`.
 #
 # The city's wasm/browser build is an optional extra target off the same core
 # (`--no-default-features --features wasm`), not the foundation.
 
 [workspace]
-members = [".", "engine"]
+members = [".", "engine", "examples/starry-night"]
+# Not the Starry Night: with two binaries in the default set, a bare
+# `cargo run` could not tell which one you meant.
 default-members = [".", "engine"]
 resolver = "2"
 

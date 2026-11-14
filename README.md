@@ -15,10 +15,10 @@
 ---
 
 A cyberpunk city, drawn out of characters, that you can walk around in — down
-the avenues, in through the doors, up to the rooftops. There is no engine
-underneath it: the world, the camera, the projection, the raycaster, every
-glyph and every colour are written from scratch in Rust and painted straight
-into your terminal.
+the avenues, in through the doors, up to the rooftops. There is no third-party
+engine underneath it: the world, the camera, the projection, the raycaster,
+every glyph and every colour are written from scratch in Rust and painted
+straight into your terminal.
 
 It is not a screensaver and it is not a video. It is a real 3D world, generated
 as you move through it, running faster than your monitor can show you.
@@ -29,7 +29,7 @@ as you move through it, running faster than your monitor can show you.
 
 |  |  |
 |---|---|
-| **Native Rust** | one crate, and exactly one dependency (`libc`, for termios). No browser, no runtime, no node, no wasm on the default path |
+| **Native Rust** | an ASCII engine crate and the city built on it, with exactly one dependency (`libc`, for termios). No browser, no runtime, no node, no wasm on the default path |
 | **0.602 ms a frame** | 180×60, measured on the current build — a 1,660 fps ceiling. [What a frame costs](docs/performance.md) |
 | **3.2 MB resident** | there is no world grid; every cell is a pure function of its coordinate, so the city is **unbounded** and walking further costs nothing |
 | **The world** | avenues and junctions, towers with six different silhouettes, lit storefronts, traffic carrying **readable registration plates**, pedestrians, lampposts, street trees, benches, phone booths, bus stops, branded pylon signs, rain you can turn on, and a star field behind it all |
@@ -112,6 +112,19 @@ Every one of these is a real frame out of the engine, same seed, same city.
 ./play --bench                                # per-frame cost: sim / cast / render / paint
 ```
 
+## A second program on the same engine
+
+The city is built on `engine/`, a crate that knows nothing about cities: the
+cell grid, glyph ramps, colour, ANSI output, the terminal and frame capture.
+The second thing built on it is Van Gogh's *The Starry Night*, pixelling in a
+scatter at a time and then flowing like wet paint:
+
+```bash
+cargo run --release -p starry-night
+```
+
+![The Starry Night in coloured ASCII](docs/frames/starry-night.png)
+
 ## Coming next
 
 - **More to press.** Every terminal, notice board and exit sign in a room
@@ -131,7 +144,8 @@ Every one of these is a real frame out of the engine, same seed, same city.
 
 | | |
 |---|---|
-| [The shape of the engine](docs/architecture.md) | crate layout, the no-grid world, the projection, the browser target |
+| [The shape of the engine](docs/architecture.md) | the engine and the city on it, the no-grid world, the projection, the browser target |
+| [The Starry Night](docs/starry-night.md) | the second program on the engine: the painting, the motion, recording it |
 | [Generating the city](docs/world-generation.md) | blocks and plots, six building silhouettes, the `--variety` knob |
 | [Doors, rooms and windows](docs/interiors.md) | how inside and outside are one mode, and how you see out |
 | [A glass lift](docs/lift.md) | which buildings get one, the panel, and the floors going past |

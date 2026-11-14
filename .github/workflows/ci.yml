@@ -16,6 +16,8 @@ jobs:
         run: cargo build --release
       - name: test
         run: cargo test --release --workspace
+      - name: build (the Starry Night, on the engine alone)
+        run: cargo build --release -p starry-night
       - name: build (core only, no dependencies)
         run: cargo build --no-default-features
       - name: build (wasm target)

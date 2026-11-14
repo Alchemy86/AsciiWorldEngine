@@ -171,6 +171,34 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   would break the raycaster's assumption that a column is a building. You can
   walk through a lamppost. That is a known trade, not an oversight.
 
+## The Starry Night (`examples/starry-night/`)
+
+- **The second program on the engine, and the test that the engine is one.**
+  It depends on `ascii-engine` alone. If it ever needs something from `src/`,
+  that something belongs in `engine/`. `cargo run --release -p starry-night`;
+  `docs/starry-night.md` has the design.
+- **The painting is never in the repo.** First run fetches Wikimedia's 960 px
+  scan with `curl` (bounded, two retries, a 1280 px fallback) into
+  `~/.cache/ascii-engine/`. Wikimedia's thumbnail service only serves its
+  standard widths: 500, 960 and 1280 work, 640 is a 400 error.
+- **`src/jpeg.rs` is baseline-only and was checked against PIL** on real
+  scans (mean error 1-2 counts R/G, ~5 B from chroma replication). Re-check it
+  with the `#[ignore]`d `decode_a_real_file_for_comparison` test
+  (`STARRY_JPEG=... STARRY_PPM_OUT=...`) if it is touched.
+- **`rng::hash3` alone is not a good scatter** at small coordinates: used
+  directly for arrival times it brought whole columns in together. `art.rs`
+  runs it through murmur3's finaliser. Do not "fix" `hash3` in the engine —
+  the city's generator is keyed on its exact values.
+- **The look is tuned by looking.** `INK_GAIN`, `INK_SATURATE`,
+  `GLYPH_GAMMA`, `LOCAL_CONTRAST`, `STROKE_EDGE` and `FLOW` were each set by
+  rendering a captured frame and comparing it with the painting. A capture's
+  cell is 11 x 18 px, so `--capture` fits the picture to 18/11, not 2.
+- **ffmpeg was not on PATH in the agent sandbox** this was built in. The
+  flatpak `org.freedesktop.Platform` runtime's ffmpeg, run through its own
+  `ld-linux` with the `codecs-extra` extension's lib dir first on
+  `--library-path`, has both `libx264` and `librsvg` and renders the `.svg`
+  frames directly.
+
 ## Inside and outside
 
 - **It is a MODE, not a branch in the renderer.** `World::place` is
