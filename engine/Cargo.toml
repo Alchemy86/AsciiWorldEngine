@@ -1,0 +1,22 @@
+[package]
+name = "ascii-engine"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Cell grid, glyph ramps, colour, ANSI output, raw terminal input and frame capture for coloured-ASCII programs"
+license = "PolyForm-Noncommercial-1.0.0"
+authors = ["Aaron Gibson"]
+publish = false
+
+[lib]
+name = "ascii_engine"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Raw mode, terminal size and key-hold input. Pulls in exactly one crate,
+# libc, for termios, poll and TIOCGWINSZ. Off for the browser build.
+term = ["dep:libc"]
+
+[dependencies]
+libc = { version = "0.2", optional = true }

@@ -14,7 +14,7 @@
 //!
 //! `row_span` is the per-row world-units-per-row derivative. It feeds the
 //! texture quantiser; substituting the flat horizon value `1/proj_y` keeps the
-//! quantiser one step too fine on distant walls and aliases the storeys away.
+//! quantiser one step too fine on distant walls and aliases fine horizontal detail away.
 
 /// Vertical half-FOV, radians (~40 degrees vertical). Fixed — horizontal FOV
 /// follows from the pixel aspect, so a wide terminal widens the view rather
@@ -104,8 +104,8 @@ impl Projection {
     /// `y`, or infinity where that row does not meet it at all.
     ///
     /// `ground_depth` is this for `h == 0`, precomputed because the ground is
-    /// always at zero. A ceiling is not: it is per room, and a floor slab is
-    /// per storey, so those two ask for it a row at a time.
+    /// always at zero. A ceiling or a raised floor is not, so those ask for it
+    /// a row at a time.
     #[inline]
     pub fn plane_depth(&self, y: usize, h: f32) -> f32 {
         let t = self.view_tan[y.min(self.rows - 1)];

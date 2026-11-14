@@ -1,12 +1,19 @@
 # AsciiWorldEngine.
 #
-# Shaped after the sibling TerminalGB project: one library crate that holds the
-# whole engine, plus real `[[bin]]` targets and feature-gated frontends. The
-# NATIVE terminal binary is the product — `cargo run` and you are walking the
-# city. No node, no browser, no wasm anywhere on that path.
+# A workspace. `engine/` is the engine: the cell grid, glyph ramps, colour,
+# ANSI/SVG output, raw terminal input, frame capture and the frame clock —
+# everything a coloured-ASCII program shares and nothing about what it draws.
+# This root package is the city, the first program built on it, and it stays
+# the default: `cargo run` and you are walking the city. No node, no browser,
+# no wasm anywhere on that path.
 #
-# The wasm/browser build is an optional extra target off the same core
+# The city's wasm/browser build is an optional extra target off the same core
 # (`--no-default-features --features wasm`), not the foundation.
+
+[workspace]
+members = [".", "engine"]
+default-members = [".", "engine"]
+resolver = "2"
 
 [package]
 name = "asciicity"
@@ -35,17 +42,18 @@ required-features = ["tui"]
 default = ["tui"]
 # Terminal frontend: raw mode, the kitty keyboard protocol for real key-hold
 # movement, 24-bit ANSI paint. The ONLY thing that pulls in an outside crate,
-# and it pulls in exactly one (libc, for termios + TIOCGWINSZ).
-tui = ["libc"]
+# and it pulls in exactly one (libc, for termios + TIOCGWINSZ), through the
+# engine's `term` feature.
+tui = ["ascii-engine/term"]
 # The browser build. Adds `extern "C"` exports over the same flat frame buffer.
 # Off by default; see build-wasm.sh.
 wasm = []
 
 [dependencies]
 # Core is dependency-free on purpose: `--no-default-features` builds the whole
-# engine — world, camera, projection, renderer — with nothing but the standard
-# library.
-libc = { version = "0.2", optional = true }
+# city — world, camera, projection, renderer — and the engine under it with
+# nothing but the standard library.
+ascii-engine = { path = "engine" }
 
 [profile.release]
 opt-level = 3

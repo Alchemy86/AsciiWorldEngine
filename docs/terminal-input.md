@@ -33,4 +33,4 @@ the exact fix for your situation, and prints it again on the way out. `Tab`
 locks a walk on, which needs no key held at all and so works the same in both
 modes. The HUD always says which mode you got.
 
-The whole of it is in `src/term/input.rs`.
+The whole of it is in `engine/src/term/input.rs`; the city's bindings are `src/term.rs`.

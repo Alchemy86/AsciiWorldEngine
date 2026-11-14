@@ -9,11 +9,29 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - **The product is the native binary.** `src/` is native Rust and there is no
   wasm on the default path; the browser target is an optional extra behind
   `--features wasm`, and nothing on the default path knows it exists.
-- **The crate shape follows the sibling TerminalGB**
-  (`~/Github/firstmate/projects/gameboy`): one lib crate holding the whole
-  engine, real `[[bin]]` targets, feature-gated frontends. The core is
-  dependency-free (`cargo build --no-default-features`); the `tui` feature pulls
-  in exactly one crate, `libc`, for termios and `TIOCGWINSZ`.
+- **It is a workspace: `engine/` is the engine, the root package is the city.**
+  `ascii-engine` holds what any coloured-ASCII program shares and nothing
+  city-specific — `Grid` (glyph/fg/bg planes, depth buffer, shade mode, a
+  generic mark plane), `ramp`, `color` (`hsl`, `shade`), `dither`, `rng`,
+  `project`, `output`, `capture`, `frame::Pacer`, and `term` (raw mode +
+  `Keyboard`, taking a `KeyMap`). The city re-exports `output`/`project`/`rng`
+  and `Grid` under their old paths so `crate::rng::noise` etc. still resolve;
+  `render::Plates` is the city's name for the mark plane (`is_plate` =
+  `is_marked`), and `src/term.rs` holds the city's key bindings and `bits()`.
+  If you find city words in `engine/`, move them out. The city keeps the
+  TerminalGB shape (real `[[bin]]`, feature-gated frontends); the core is
+  dependency-free (`cargo build --no-default-features`) and `tui` pulls in
+  exactly one crate, `libc`, through `ascii-engine/term`.
+- **The split was proven byte-identical, and that is the bar for touching the
+  engine.** Every frame of `--capture`, `--capture --shade --weather rain`,
+  `--vista`, two `--film` reels (one rain, one shaded), `--doorway`, `--lift`,
+  `--plate-shot`, `--wayfind` and `--drivethru` — 3,912 `.svg`/`.txt` files —
+  hashed the same before and after. To check a later engine change the same
+  way, build the old ref from `git archive` and run both over the same flags
+  into two dirs, then `diff -rq`.
+- **`B` (shaded cells) is not in the one-shot key list** in `src/term.rs`, so
+  `kb.tapped(b'b')` never fires in play; `--shade` works. Pre-existing as of
+  the split, left alone so the split changed no behaviour.
 - **`render.rs` and `palette.rs` are the whole look.** Every facade rule,
   falloff curve, dither threshold and ground rule is in those two files and
   nowhere else. Change the look there rather than compensating for it
@@ -570,8 +588,9 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   first attempt used `=` and did exactly that; and there is **one colour front
   and rear** now, because a white frame on black is interface furniture and
   collides with the ink.
-- **`Grid::plate` is how a plate is found**, not its colours. One byte a cell,
-  set by `put_plate`, cleared by `put` when something overdraws. Three things
+- **`Grid::is_plate` (the engine's mark plane, via `render::Plates`) is how a
+  plate is found**, not its colours. One byte a cell, set by `put_plate`,
+  cleared by `put` when something overdraws. Three things
   read it: the rain pass (a drop through a registration reads as a different
   registration), `--plate-shot`, and
   `a_plate_on_screen_is_never_a_registration_other_than_its_own`.
@@ -643,7 +662,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   canvas. There is no panel now, so there is no bold, and the plate reads by its
   SHAPE instead: a rectangle closed on all sides is a stronger "this is an
   object" signal than weight ever was at one character per cell.
-- `--plate-shot` is the evidence tool. It scores frames on `Grid::plate` — the
+- `--plate-shot` is the evidence tool. It scores frames on the plate (mark) plane — the
   plate plane, NOT the background plane, which is a surface colour now — and
   prints which registrations from
   whatever list is actually on the road (`eng.pop.plates`, not the raw
@@ -755,7 +774,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   after the first press with the finger still down; and only ONE key repeats, so
   a second key silently kills the first. Lengthening a hold window cannot fix
   either — a window long enough to cover the silence also outlasts letting go.
-- The fixes, all in `src/term/input.rs` and `Camera::glide`: **measure** the
+- The fixes, all in `engine/src/term/input.rs` and `Camera::glide`: **measure** the
   autorepeat delay off the player's own first hold and expect the silence it
   makes; let a key whose repeat cadence proves a finger is down survive losing
   that repeat *only when another key was pressed on top of it* (the one signal
@@ -766,7 +785,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   this and says so on screen, and again on exit.
 - **Test input as a model, not through a terminal.** `Keyboard::press` /
   `expire` take the state machine apart from the byte reader, so the tests in
-  `term/input.rs` replay a synthetic autorepeat stream against it directly. For
+  `engine/src/term/input.rs` replay a synthetic autorepeat stream against it directly. For
   end-to-end *feel*, drive the real binary through a `pty` and read the HUD:
   `yaw` (2 dp) and `eye` (1 dp) have far better resolution than position and are
   the honest probes. Two traps found the hard way: a replay harness must not

@@ -15,7 +15,7 @@ jobs:
       - name: build (default features — the terminal binary)
         run: cargo build --release
       - name: test
-        run: cargo test --release
+        run: cargo test --release --workspace
       - name: build (core only, no dependencies)
         run: cargo build --no-default-features
       - name: build (wasm target)

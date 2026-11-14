@@ -3,10 +3,17 @@
 version = 3
 
 [[package]]
-name = "asciicity"
+name = "ascii-engine"
 version = "0.1.0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "asciicity"
+version = "0.1.0"
+dependencies = [
+ "ascii-engine",
 ]
 
 [[package]]

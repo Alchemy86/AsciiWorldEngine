@@ -27,10 +27,11 @@
 //! would leave you walking for two thirds of a second. So the hole and the
 //! second key are solved separately, and neither is solved here alone:
 //!
-//!   * **The hole** is bridged by the camera, not by the parser —
-//!     `Camera::glide` keeps the last commanded velocity alive and then slides
-//!     off it, so the gap reads as a walk carrying its own weight rather than a
-//!     stop. The window here only has to outlast the autorepeat *period*.
+//!   * **The hole** is bridged by whatever moves, not by the parser — a
+//!     program keeps the last commanded velocity alive for `glide_needed`
+//!     seconds and then slides off it, so the gap reads as motion carrying its
+//!     own weight rather than a stop. The window here only has to outlast the
+//!     autorepeat *period*.
 //!   * **The second key** is solved by *latching*. Three or more presses whose
 //!     gaps are all shorter than a human can tap is proof of autorepeat, which
 //!     is proof that a finger is physically down. A key that has proved itself
@@ -45,7 +46,6 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::camera::key;
 
 /// How long a key counts as held after a press once its repeats have started.
 /// A repeat is due within 25–50 ms on any system you will meet, so this only
@@ -70,15 +70,6 @@ const FIRST_HOLD_MARGIN: Duration = Duration::from_millis(30);
 const DELAY_GUESS: Duration = Duration::from_millis(520);
 
 /// The longest gap between two presses that can still be autorepeat rather than
-/// Every key the game reads as a one-shot press rather than as movement.
-/// Ctrl-C, Tab and Esc, then `l m n p q t v x` and Enter. Keep it in step with
-/// the `kb.tapped(...)` calls in `bin/asciicity.rs` — nothing checks that they
-/// agree, and a key missing from here is a key that does nothing.
-const ONE_SHOT: [u32; 12] = [
-    3, 9, 13, 27, b'l' as u32, b'm' as u32, b'n' as u32, b'p' as u32, b'q' as u32,
-    b't' as u32, b'v' as u32, b'x' as u32,
-];
-
 /// a fast human tap. Human double-taps do not get under ~110 ms; autorepeat
 /// does not get over ~55 ms.
 const REPEAT_GAP: Duration = Duration::from_millis(90);
@@ -87,8 +78,7 @@ const REPEAT_PROOF: u32 = 3;
 /// Once a key has proved itself AND another key has been pressed on top of it,
 /// it stays down this long — bounded, because the finger really might have come
 /// off during the other key's repeat and there is no way to know. Long enough
-/// to look up at a tower (0.8 s) or turn a corner (1.5 s) without stopping.
-/// `Tab` is the unbounded answer for anyone who wants one.
+/// to look up (0.8 s) or turn a corner (1.5 s) without stopping.
 const LATCH_MAX: Duration = Duration::from_millis(2200);
 /// Plausible bounds on an OS autorepeat delay. Outside these it was a human.
 const DELAY_MIN: Duration = Duration::from_millis(120);
@@ -126,25 +116,29 @@ struct Held {
     buried: bool,
 }
 
-/// Keys that cancel each other. Pressing one clears the other's latch, so a
-/// latched walk forward never fights a deliberate step back.
-const OPPOSED: [(u32, u32); 5] = [
-    (b'w' as u32, b's' as u32),
-    (b'a' as u32, b'd' as u32),
-    (b'j' as u32, b'k' as u32),
-    (b'r' as u32, b'f' as u32),
-    (b'e' as u32, b'c' as u32),
-];
+/// **Which keys mean what to the state machine**, as the program sees it.
+///
+/// `one_shot` are keys read as a single press (quit, a toggle) rather than as
+/// held movement: a press of one lands in `Keyboard::taps` once. `opposed` are
+/// pairs that cancel each other, so pressing one clears the other's latch and a
+/// latched walk forward never fights a deliberate step back. Codes are
+/// lower-case ASCII or the `K_*` constants.
+#[derive(Clone, Copy)]
+pub struct KeyMap {
+    pub one_shot: &'static [u32],
+    pub opposed: &'static [(u32, u32)],
+}
 
 pub struct Keyboard {
     pub kitty: bool,
+    map: KeyMap,
     held: HashMap<u32, Held>,
     pending: Vec<u8>,
     /// When anything at all last arrived. The latch leans on this.
     last_event: Option<Instant>,
-    /// Did this poll see any key at all? Distinct from `taps` and `bits`,
-    /// which only speak for keys the game binds — the autopilot hands over on
-    /// *any* key, including ones that do nothing.
+    /// Did this poll see any key at all? Distinct from `taps` and `down`,
+    /// which only speak for keys the program binds; this answers for *any*
+    /// key, including ones that do nothing.
     fresh: bool,
     /// The OS autorepeat delay, once we have watched one hold and seen it.
     repeat_delay: Option<Duration>,
@@ -156,9 +150,10 @@ pub struct Keyboard {
 }
 
 impl Keyboard {
-    pub fn new(kitty: bool) -> Self {
+    pub fn new(kitty: bool, map: KeyMap) -> Self {
         Keyboard {
             kitty,
+            map,
             held: HashMap::new(),
             pending: Vec::new(),
             last_event: None,
@@ -332,7 +327,7 @@ impl Keyboard {
 
         // Pressing a key deliberately cancels whatever it opposes: a latched
         // walk must never survive you asking for the other direction.
-        for (a, b) in OPPOSED {
+        for &(a, b) in self.map.opposed {
             if lower == a {
                 self.held.remove(&b);
             } else if lower == b {
@@ -386,42 +381,19 @@ impl Keyboard {
 
         // One-shot actions are consumed on the press edge, not while held.
         //
-        // **Every key the frontend reads with `tapped` has to be in here**, and
-        // this list is the whole reason a key can be wired up, documented in
-        // `--help`, covered by a passing test and still do nothing at all when
-        // somebody actually plays: `M` and the act key's own HUD note had both
-        // been missing from it. A key that only moves the camera goes through
-        // `bits` instead and does not belong here.
-        if ONE_SHOT.contains(&lower) {
+        // **Every key the program reads with `tapped` has to be in its
+        // `one_shot` list**, or it can be wired up, documented and covered by a
+        // passing test and still do nothing at all when somebody actually
+        // plays. A key that is only ever held is read with `down` instead.
+        if self.map.one_shot.contains(&lower) {
             self.taps.push(lower);
         }
     }
 
+    /// Is this key down right now? Lower-case ASCII or a `K_*` constant.
     #[inline]
-    fn down(&self, code: u32) -> bool {
+    pub fn down(&self, code: u32) -> bool {
         self.held.contains_key(&code)
-    }
-
-    /// The engine's input bitmask. This is the ONLY thing about input that
-    /// crosses into the engine.
-    pub fn bits(&self) -> u32 {
-        let mut k = 0;
-        if self.down(b'w' as u32) || self.down(K_UP) { k |= key::FWD; }
-        if self.down(b's' as u32) || self.down(K_DOWN) { k |= key::BACK; }
-        if self.down(b'a' as u32) { k |= key::STRAFE_L; }
-        if self.down(b'd' as u32) { k |= key::STRAFE_R; }
-        if self.down(b'j' as u32) || self.down(K_LEFT) { k |= key::TURN_L; }
-        if self.down(b'k' as u32) || self.down(K_RIGHT) { k |= key::TURN_R; }
-        if self.down(b'r' as u32) { k |= key::LOOK_UP; }
-        if self.down(b'f' as u32) { k |= key::LOOK_DOWN; }
-        if self.down(b' ' as u32) || self.down(K_SHIFT) { k |= key::SPRINT; }
-        if self.down(b'e' as u32) || self.down(K_PGUP) { k |= key::RISE; }
-        if self.down(b'c' as u32) || self.down(K_PGDN) { k |= key::SINK; }
-        // Act on whatever is in reach. Edge-triggered inside the ENGINE, not
-        // here, so every frontend — keyboard, film script, test — presses a
-        // panel exactly once for one press.
-        if self.down(b'x' as u32) || self.down(13) { k |= key::ACT; }
-        k
     }
 
     pub fn tapped(&self, code: u32) -> bool {
@@ -482,9 +454,20 @@ impl Keyboard {
 mod tests {
     use super::*;
 
+    const TEST_MAP: KeyMap = KeyMap {
+        one_shot: &[3, 27, b'q' as u32],
+        opposed: &[(b'w' as u32, b's' as u32), (b'j' as u32, b'k' as u32)],
+    };
+
     struct Seen {
-        bits: u32,
+        down: Vec<u32>,
         latched: bool,
+    }
+
+    impl Seen {
+        fn has(&self, code: u8) -> bool {
+            self.down.contains(&(code as u32))
+        }
     }
 
     /// Replay a stream of (offset-from-start, key) presses against the state
@@ -492,7 +475,7 @@ mod tests {
     /// involved — this is the model, tested as a model.
     fn replay(events: &[(u64, u32)], at_ms: u64) -> Seen {
         let base = Instant::now();
-        let mut kb = Keyboard::new(false);
+        let mut kb = Keyboard::new(false, TEST_MAP);
         // Instant cannot be built from a number, so drive the clock the only
         // honest way: sleep. The streams are short.
         let until = |ms: u64| {
@@ -509,7 +492,9 @@ mod tests {
         }
         until(at_ms);
         kb.expire(Instant::now());
-        Seen { bits: kb.bits(), latched: kb.latched() }
+        let mut down: Vec<u32> = kb.held.keys().copied().collect();
+        down.sort();
+        Seen { down, latched: kb.latched() }
     }
 
     /// The stream a physically held `key` produces with no releases to report:
@@ -533,8 +518,8 @@ mod tests {
         let e = autorepeat(b'w' as u32, 0, 1200);
         for probe in [120u64, 300, 460, 700, 1000] {
             assert_eq!(
-                replay(&e, probe).bits & key::FWD,
-                key::FWD,
+                replay(&e, probe).has(b'w'),
+                true,
                 "walking stopped {probe} ms into a held key"
             );
         }
@@ -548,12 +533,8 @@ mod tests {
         let mut e = autorepeat(b'w' as u32, 0, 800);
         e.extend(autorepeat(b'k' as u32, 800, 2200));
         let seen = replay(&e, 1600);
-        assert_eq!(seen.bits & key::TURN_R, key::TURN_R, "the new key must be down");
-        assert_eq!(
-            seen.bits & key::FWD,
-            key::FWD,
-            "the held key must NOT die when it loses the repeat"
-        );
+        assert!(seen.has(b'k'), "the new key must be down");
+        assert!(seen.has(b'w'), "the held key must NOT die when it loses the repeat");
     }
 
     #[test]
@@ -562,8 +543,8 @@ mod tests {
         // came off, and it must be believed quickly — this is the half of the
         // problem that a longer hold window would have made worse.
         let e = autorepeat(b'w' as u32, 0, 900);
-        assert_eq!(replay(&e, 1000).bits & key::FWD, key::FWD, "still held at +70 ms");
-        assert_eq!(replay(&e, 1120).bits & key::FWD, 0, "must be released by +190 ms");
+        assert!(replay(&e, 1000).has(b'w'), "still held at +70 ms");
+        assert!(!replay(&e, 1120).has(b'w'), "must be released by +190 ms");
     }
 
     #[test]
@@ -571,7 +552,7 @@ mod tests {
         let mut e = autorepeat(b'w' as u32, 0, 800);
         e.extend(autorepeat(b'k' as u32, 800, 1400));
         let seen = replay(&e, 2400);
-        assert_eq!(seen.bits, 0, "silence must end the walk and the turn alike");
+        assert!(seen.down.is_empty(), "silence must end the walk and the turn alike");
     }
 
     #[test]
@@ -581,8 +562,8 @@ mod tests {
         // might have come off — so it has to lapse.
         let mut e = autorepeat(b'w' as u32, 0, 700);
         e.extend(autorepeat(b'k' as u32, 700, 4200));
-        assert_eq!(replay(&e, 1800).bits & key::FWD, key::FWD, "held at +1.1 s");
-        assert_eq!(replay(&e, 3400).bits & key::FWD, 0, "must lapse by LATCH_MAX");
+        assert!(replay(&e, 1800).has(b'w'), "held at +1.1 s");
+        assert!(!replay(&e, 3400).has(b'w'), "must lapse by LATCH_MAX");
     }
 
     #[test]
@@ -591,7 +572,7 @@ mod tests {
         // mistaken for a finger held down. Each is a step and then it is over.
         let e = vec![(0, b'w' as u32), (200, b'w' as u32), (400, b'w' as u32)];
         assert!(!replay(&e, 700).latched, "tapping must not latch a walk on");
-        assert_eq!(replay(&e, 1300).bits & key::FWD, 0, "the last tap must run out");
+        assert!(!replay(&e, 1300).has(b'w'), "the last tap must run out");
     }
 
     #[test]
@@ -599,21 +580,21 @@ mod tests {
         let mut e = autorepeat(b'w' as u32, 0, 800);
         e.extend(autorepeat(b's' as u32, 800, 1600));
         let seen = replay(&e, 1300);
-        assert_eq!(seen.bits & key::FWD, 0, "pressing back must cancel a latched forward");
-        assert_eq!(seen.bits & key::BACK, key::BACK);
+        assert!(!seen.has(b'w'), "pressing back must cancel a latched forward");
+        assert!(seen.has(b's'));
     }
 
     #[test]
     fn shift_does_not_stick_on() {
         // One capital letter used to set sprint for the rest of the run.
         let e = vec![(0, K_SHIFT), (0, b'w' as u32)];
-        assert_eq!(replay(&e, 1400).bits & key::SPRINT, 0, "sprint must not latch on for ever");
+        assert!(!replay(&e, 1400).down.contains(&K_SHIFT), "sprint must not latch on for ever");
     }
 
     #[test]
     fn the_autorepeat_delay_is_measured_not_guessed() {
         let base = Instant::now();
-        let mut kb = Keyboard::new(false);
+        let mut kb = Keyboard::new(false, TEST_MAP);
         let until = |ms: u64| {
             while base.elapsed() < Duration::from_millis(ms) {
                 std::thread::sleep(Duration::from_millis(1));

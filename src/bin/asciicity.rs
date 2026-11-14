@@ -14,9 +14,11 @@ use std::time::{Duration, Instant};
 
 use asciicity::camera::key;
 use asciicity::rng::Rng;
-use asciicity::term::{terminal_size, Keyboard, RawTerm};
+use asciicity::term::{bits, terminal_size, Keyboard, RawTerm, KEYS};
 use asciicity::world::World;
 use asciicity::palette::PlateSource;
+use asciicity::render::Plates as _;
+use ascii_engine::frame::Pacer;
 use asciicity::{grid_to_ansi, grid_to_svg, grid_to_text, Camera, Engine};
 
 /// A terminal character is about twice as tall as it is wide. That ratio is
@@ -377,7 +379,7 @@ fn play(a: &Args, demo: bool, ride: bool) {
             std::process::exit(1);
         }
     };
-    let mut kb = Keyboard::new(term.kitty);
+    let mut kb = Keyboard::new(term.kitty, KEYS);
     let (mut tc, mut tr) = terminal_size();
     let (mut cols, mut rows) = (a.cols.unwrap_or(tc), a.rows.unwrap_or(tr.saturating_sub(1)).max(8));
     let mut eng = make(a, cols, rows);
@@ -391,11 +393,8 @@ fn play(a: &Args, demo: bool, ride: bool) {
     eng.cam.glide = kb.glide_needed();
     let mut ansi = String::new();
     let mut out = std::io::stdout();
-    let mut last = Instant::now();
+    let mut pacer = Pacer::new(Duration::from_millis(16), 0.1);
     let mut paint_us = 0.0f32;
-    let mut fps_t = Instant::now();
-    let mut fps_n = 0u32;
-    let mut fps = 0.0f32;
     let mut auto_walk = false;
     let mut pilot = if demo { Some(Autopilot::new(a.seed as u64)) } else { None };
     // **Ride mode from the command line.** Walk into a lift and put it on a
@@ -493,9 +492,7 @@ fn play(a: &Args, demo: bool, ride: bool) {
             let _ = out.write_all(b"\x1b[2J");
         }
 
-        let now = Instant::now();
-        let dt = (now - last).as_secs_f32().min(0.1);
-        last = now;
+        let dt = pacer.begin();
         eng.cam.glide = kb.glide_needed();
         if let Some(p) = pilot.as_mut() {
             if p.wants_weather_change(dt) {
@@ -505,7 +502,7 @@ fn play(a: &Args, demo: bool, ride: bool) {
         let bits = match pilot.as_mut() {
             Some(p) => p.drive(&eng.world, &eng.cam, dt),
             None => {
-                let mut b = kb.bits();
+                let mut b = bits(&kb);
                 // A locked walk is the one thing that works the same in both
                 // input modes: it needs no key held, so looking around while
                 // moving costs nothing and cannot be taken away by a terminal
@@ -563,7 +560,7 @@ fn play(a: &Args, demo: bool, ride: bool) {
             rows + 1,
             eng.cam.x, eng.cam.z, eng.cam.yaw, eng.cam.eye,
             s.sim_us / 1000.0, s.cast_us / 1000.0, s.render_us / 1000.0, paint_us / 1000.0,
-            fps, eng.hit_count(), cols, rows, where_now, mode,
+            pacer.fps(), eng.hit_count(), cols, rows, where_now, mode,
             note,
         );
         let _ = out.write_all(ansi.as_bytes());
@@ -574,18 +571,12 @@ fn play(a: &Args, demo: bool, ride: bool) {
         let _ = out.flush();
         paint_us = t.elapsed().as_secs_f32() * 1e6;
 
-        fps_n += 1;
-        if fps_t.elapsed() > Duration::from_millis(500) {
-            fps = fps_n as f32 / fps_t.elapsed().as_secs_f32();
-            fps_t = Instant::now();
-            fps_n = 0;
+        if pacer.count_frame() {
             note.clear();
         }
-        let spent = now.elapsed();
-        if spent < Duration::from_millis(16) {
-            std::thread::sleep(Duration::from_millis(16) - spent);
-        }
+        pacer.rest();
     }
+    let fps = pacer.fps();
     let degraded = !term.kitty;
     drop(term);
     println!("walked to {:.0},{:.0}. {:.0} fps at {cols}x{rows}.", eng.cam.x, eng.cam.z, fps);
@@ -1037,11 +1028,7 @@ fn still(a: &Args) {
 }
 
 fn write_frame(eng: &Engine, dir: &str, name: &str, title: &str) -> String {
-    let _ = std::fs::create_dir_all(dir);
-    let stem = format!("{dir}/{name}");
-    let _ = std::fs::write(format!("{stem}.svg"), grid_to_svg(&eng.grid, title));
-    let _ = std::fs::write(format!("{stem}.txt"), grid_to_text(&eng.grid));
-    stem
+    ascii_engine::capture::write_frame(&eng.grid, dir, name, title)
 }
 
 /// A scripted walk: settle, walk, turn, sprint, then rise to the vista. The

@@ -2,7 +2,7 @@
 //! for committed evidence frames. No dependencies — these are just string
 //! builders over the same grid the frontends paint.
 
-use crate::render::Grid;
+use crate::grid::Grid;
 use std::fmt::Write as _;
 
 /// 24-bit ANSI, one escape sequence only where the colour actually changes.
@@ -16,7 +16,7 @@ use std::fmt::Write as _;
 /// byte is emitted — which is why the plain look costs what it always did.
 ///
 /// With shading on the background IS most of the frame, and the cost is the
-/// escape sequences, not the compare. That is why `palette::shade` quantises:
+/// escape sequences, not the compare. That is why `color::shade` quantises:
 /// backgrounds that agree to within four counts of 255 come out byte-identical
 /// and collapse into one run.
 pub fn grid_to_ansi(g: &Grid, out: &mut String) {
@@ -91,7 +91,7 @@ pub fn grid_to_text(g: &Grid) -> String {
 /// The cell is 11x18 — a 5.5:9 aspect, so the picture is not stretched
 /// relative to the projection it was built for — and the type is set at 1.11x
 /// the row height (10px glyphs on a 9px pitch). Glyphs that under-fill their
-/// cell are what make an ASCII city look washed out; `textLength` keeps a run
+/// cell are what make an ASCII picture look washed out; `textLength` keeps a run
 /// locked to the grid. The scanline and vignette are drawn over the top.
 pub fn grid_to_svg(g: &Grid, title: &str) -> String {
     const CW: usize = 11;
@@ -184,11 +184,9 @@ font-size=\"{:.1}\" font-weight=\"700\">\n",
 
 /// One run of same-coloured characters.
 ///
-/// There is no weight axis here any more. It existed for one thing — a
-/// registration plate was once black characters on a painted yellow panel, and
-/// a registration is set heavy — and a plate has been drawn out of ordinary
-/// characters since. The background plane is a surface colour now, not a
-/// panel, so a cell having one says nothing about what is written on it.
+/// There is no weight axis: every glyph is set at one weight. The background
+/// plane is a surface colour, not a panel, so a cell having one says nothing
+/// about what is written on it.
 fn flush_run(
     s: &mut String,
     run: &str,

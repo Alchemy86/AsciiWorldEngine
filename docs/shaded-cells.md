@@ -56,7 +56,7 @@ That is the plane this fills. Nothing new was built to hold it.
 Two things write it:
 
 * **`Grid::put`** — the call every drawing pass in the engine already makes.
-  With shading on it also writes `palette::shade(colour, glyph)` into the
+  With shading on it also writes `ascii_engine::color::shade(colour, glyph)` into the
   background of the cell it just drew.
 * **`Grid::put_bg`** — the new one, for the cells a surface pass *skips*. The
   empty end of the wall ramp, the unpainted half of a road marking, the two
@@ -72,7 +72,7 @@ with stars on it, which is why the skyline has no edge — black city against
 black sky. Shaded it gets the gradient a night sky over a lit city actually
 has, and a tower has something to be a silhouette against.
 
-## The two numbers in `palette::shade`
+## The two numbers in `color::shade`
 
 ```
 SHADE_LEVEL_Q      348/1024   how much of a surface's colour survives into the gap

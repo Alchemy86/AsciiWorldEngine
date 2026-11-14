@@ -50,7 +50,7 @@ command -v cargo >/dev/null 2>&1 || die "cargo still not on PATH; open a new she
 
 # --- 2. build -------------------------------------------------------------
 # Quiet unless it actually has work to do, so a second run starts instantly.
-if [ ! -x target/release/asciicity ] || [ -n "$(find src Cargo.toml -newer target/release/asciicity 2>/dev/null | head -1)" ]; then
+if [ ! -x target/release/asciicity ] || [ -n "$(find src engine Cargo.toml -newer target/release/asciicity 2>/dev/null | head -1)" ]; then
   say "Building (first run only; a minute or so)..."
   cargo build --release
 fi

@@ -26,14 +26,16 @@ pub mod interior;
 /// The lift: which buildings have one, what floors it serves, and where the
 /// car is. All world model; the renderer decides nothing about it.
 pub mod lift;
-pub mod output;
 pub mod palette;
-pub mod project;
 pub mod raycast;
 pub mod render;
-pub mod rng;
 pub mod world;
 
+/// The engine's own modules, under the names the city has always used.
+pub use ascii_engine::{output, project, rng};
+
+/// The terminal frontend's half of input: the engine's raw mode and key
+/// state, with the city's keys bound onto them.
 #[cfg(feature = "tui")]
 pub mod term;
 
@@ -46,7 +48,7 @@ pub use lift::Lift;
 pub use world::Place;
 pub use output::{grid_to_ansi, grid_to_svg, grid_to_text};
 pub use project::Projection;
-pub use render::Grid;
+pub use ascii_engine::Grid;
 pub use world::World;
 
 /// Per-frame cost, in microseconds, split the way it is worth splitting:
@@ -680,6 +682,7 @@ impl Clock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::Plates as _;
 
     #[test]
     fn projection_row_and_its_inverse_agree() {
@@ -2346,7 +2349,7 @@ mod tests {
         for i in 0..600 {
             e.step(1.0 / 60.0, camera::key::FWD, 0.0, 0.0);
             e.render();
-            if !e.grid.has_plates {
+            if !e.grid.has_plates() {
                 continue;
             }
             output::grid_to_ansi(&e.grid, &mut ansi);

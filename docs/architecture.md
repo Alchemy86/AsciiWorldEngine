@@ -1,27 +1,43 @@
 # The shape of the engine
 
-One library crate holds the whole engine. The binaries are thin: they read
-keys, hand over an input bitmask and an elapsed time, ask for a frame, and
-paint the flat buffer that comes back. Nothing about the picture is decided
-outside `src/`.
+The repository is a Cargo workspace of two layers. `engine/` (`ascii-engine`)
+is what any coloured-ASCII program shares and knows nothing about a city: the
+cell grid and its shaded background, glyph ramps, colour, the ordered dither,
+hashing, the column projection, ANSI/SVG/text output, frames to disk, the
+frame clock, and raw terminal input. The city is the root package and the
+first program on it; everything about what you see in the city is decided in
+its `src/`. The city's binary is thin: it reads keys, hands over an input
+bitmask and an elapsed time, asks for a frame, and paints the flat buffer that
+comes back.
 
 ```bash
-cargo build --no-default-features   # the whole engine, standard library only
+cargo build --no-default-features   # the whole city and engine, standard library only
 ```
 
-| | |
+| the engine, `engine/src/` | |
+|---|---|
+| `grid.rs` | the cell grid: glyph, colour and background planes, depth buffer, shading mode, a mark plane |
+| `ramp.rs` | glyph coverage, the classic ramp, brightness to glyph |
+| `color.rs` | `hsl`, and the shaded-cell background (`shade`) |
+| `dither.rs` | the 8x8 ordered dither |
+| `rng.rs` | the lattice hash and the small RNG |
+| `project.rs` | field of view, horizon, and the screen-row maths |
+| `output.rs` | 24-bit ANSI, plain text, SVG |
+| `capture.rs` | a frame to disk as `.svg` + `.txt` |
+| `frame.rs` | the frame loop's clock: `dt`, fps, sleeping to a budget |
+| `term/` | raw mode, terminal size, key-hold input (`term` feature; the only dependency, `libc`) |
+
+| the city, `src/` | |
 |---|---|
 | `src/world.rs` | the city. No grid in memory — every cell is a pure function of its coordinate, so the city is unbounded and costs nothing to hold. Also `World::place`: which of the two we are in |
 | `src/interior.rs` | insides. One room at a time, as a real grid, generated from the building it belongs to — doors, glazing, furniture, fixtures |
 | `src/camera.rs` | walk, strafe, sprint, turn, look, eye height, collision |
-| `src/project.rs` | field of view, horizon, and the screen-row maths |
 | `src/raycast.rs` | one DDA per column, with the occlusion cull |
 | `src/render.rs` | sky, ground, tower body, storefront, far skyline, roofs, population |
-| `src/palette.rs` | colour, the ordered dither, the facade tables |
+| `src/palette.rs` | the city's colours, textures and facade tables |
 | `src/entities.rs` | pedestrians, traffic and their plates, and the weather |
-| `src/output.rs` | 24-bit ANSI, plain text, SVG |
 | `src/film.rs` | the film script: a duration and the keys held for it |
-| `src/term/` | the terminal frontend (`tui` feature; the only dependency the crate has, `libc`) |
+| `src/term.rs` | the city's key bindings on the engine's terminal (`tui` feature) |
 | `src/wasm.rs` | the optional browser target (`wasm` feature) |
 
 ## There is no world grid

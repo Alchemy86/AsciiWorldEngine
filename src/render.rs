@@ -27,6 +27,41 @@ use crate::project::Projection;
 use crate::raycast::{Rays, NEAR_MAX};
 use crate::rng::noise;
 use crate::world::{surface, Cell, Place, Placed, Prop, World, BLOCK, BLOCK_BUILT};
+pub use ascii_engine::Grid;
+
+/// **Which cells are part of a registration plate**: the engine grid's mark
+/// plane, under the name the city reads it by.
+///
+/// A plate is made of the same coloured-glyph-on-black everything else is made
+/// of, which is the point — but it still has to be findable, and by something
+/// better than guessing at colours. Three things read it and all three have to
+/// be right: the rain pass, which must not knock a character out of a
+/// registration; `--plate-shot`, which scores frames on the plates in them; and
+/// the test that says a plate on screen is never a registration other than its
+/// own.
+pub trait Plates {
+    /// Is this cell part of a plate?
+    fn is_plate(&self, x: i32, y: i32) -> bool;
+    /// Did this frame draw a plate anywhere?
+    fn has_plates(&self) -> bool;
+    /// The same as `put`, and it marks the cell as belonging to a plate.
+    fn put_plate(&mut self, x: i32, y: i32, ch: u8, rgb: [u8; 3], d: f32);
+}
+
+impl Plates for Grid {
+    #[inline]
+    fn is_plate(&self, x: i32, y: i32) -> bool {
+        self.is_marked(x, y)
+    }
+    #[inline]
+    fn has_plates(&self) -> bool {
+        self.has_marks
+    }
+    #[inline]
+    fn put_plate(&mut self, x: i32, y: i32, ch: u8, rgb: [u8; 3], d: f32) {
+        self.put_marked(x, y, ch, rgb, d)
+    }
+}
 
 /// Near geometry falls off linearly to here.
 const FALLOFF: f32 = 150.0;
@@ -118,250 +153,6 @@ const DOOR_TOP: f32 = 2.35;
 /// dark is `Interior::fall`, and that is per room.
 const ROOM_MAX: f32 = 72.0;
 
-pub struct Grid {
-    pub cols: usize,
-    pub rows: usize,
-    pub ch: Vec<u8>,
-    pub rgb: Vec<u8>,
-    /// **The background colour plane**: 3 bytes a cell, `[r, g, b]`, the colour
-    /// of the part of the cell the glyph does not cover.
-    ///
-    /// It was built for one thing — a registration plate used to be black
-    /// characters ON yellow — and then sat unused when a plate became drawn
-    /// characters like everything else. `shade` is what fills it now: every
-    /// surface on the frame puts a dimmed version of its own colour here, so
-    /// the gaps between glyphs are the surface instead of black. While shading
-    /// is off nothing writes it, `has_bg` stays false, and all three output
-    /// paths skip the plane entirely — which is why the plain look costs
-    /// exactly what it always did.
-    pub bg: Vec<u8>,
-    /// Whether anything on this frame actually wrote a background. While it is
-    /// false both output paths skip the background plane entirely and `put`
-    /// does not bother clearing it, so a frame drawn with shading off costs
-    /// what it cost before there was a background at all.
-    pub has_bg: bool,
-    /// **Shaded cells on or off** — the mode, held on the grid because the
-    /// grid is the thing that has a background plane.
-    ///
-    /// Off, every `put` is exactly the `put` it has always been and nothing
-    /// touches `bg`: the glyph plane, the colour plane and the depth buffer
-    /// come out bit-identical to the build before shading existed, which is
-    /// what `shading_only_adds_a_colour_plane` asserts. On, the same glyphs in
-    /// the same colours are drawn over a background of the surface they belong
-    /// to. Shading never changes WHICH character is drawn anywhere.
-    pub shade: bool,
-    /// **Which cells are part of a registration plate.** One byte a cell, and
-    /// only touched on a frame that drew one.
-    ///
-    /// A plate is now made of the same coloured-glyph-on-black everything else
-    /// is made of, which is the point — but it still has to be findable, and by
-    /// something better than guessing at colours. Three things read it and all
-    /// three have to be right: the rain pass, which must not knock a character
-    /// out of a registration; `--plate-shot`, which scores frames on the plates
-    /// in them; and the test that says a plate on screen is never a
-    /// registration other than its own.
-    pub plate: Vec<u8>,
-    pub has_plates: bool,
-    depth: Vec<f32>,
-}
-
-impl Grid {
-    pub fn new(cols: usize, rows: usize) -> Self {
-        Grid {
-            cols,
-            rows,
-            ch: vec![b' '; cols * rows],
-            rgb: vec![0; cols * rows * 3],
-            bg: vec![0; cols * rows * 3],
-            has_bg: false,
-            shade: false,
-            plate: vec![0; cols * rows],
-            has_plates: false,
-            depth: vec![f32::INFINITY; cols * rows],
-        }
-    }
-
-    pub fn resize(&mut self, cols: usize, rows: usize) {
-        if cols == self.cols && rows == self.rows {
-            return;
-        }
-        let shade = self.shade;
-        *self = Grid::new(cols, rows);
-        self.shade = shade;
-    }
-
-    fn clear(&mut self) {
-        self.ch.fill(b' ');
-        self.rgb.fill(0);
-        if self.has_bg {
-            self.bg.fill(0);
-            self.has_bg = false;
-        }
-        if self.has_plates {
-            self.plate.fill(0);
-            self.has_plates = false;
-        }
-        self.depth.fill(f32::INFINITY);
-    }
-
-    #[inline]
-    fn put(&mut self, x: i32, y: i32, ch: u8, rgb: [u8; 3], d: f32) {
-        if x < 0 || y < 0 || x >= self.cols as i32 || y >= self.rows as i32 {
-            return;
-        }
-        let i = y as usize * self.cols + x as usize;
-        if d > self.depth[i] {
-            return;
-        }
-        self.ch[i] = ch;
-        self.depth[i] = d;
-        self.rgb[i * 3] = rgb[0];
-        self.rgb[i * 3 + 1] = rgb[1];
-        self.rgb[i * 3 + 2] = rgb[2];
-        if self.shade {
-            // The gaps around this glyph are the surface it is drawn on, a
-            // third as bright. One branch, predicted the same way on every cell
-            // of a frame, and nothing at all while the mode is off.
-            let s = crate::palette::shade(rgb, ch);
-            self.bg[i * 3] = s[0];
-            self.bg[i * 3 + 1] = s[1];
-            self.bg[i * 3 + 2] = s[2];
-            self.has_bg = true;
-        }
-        if self.has_plates {
-            self.plate[i] = 0;
-        }
-    }
-
-    /// **The background alone, where no glyph is drawn.**
-    ///
-    /// A surface pass skips a cell whenever its texture comes out blank — the
-    /// empty end of the wall ramp, the unpainted half of a road marking, the
-    /// two thirds of a distant facade deliberately left dark. Those cells are
-    /// most of what reads as a hole in a complex frame, and they are the ones
-    /// shading is for. This writes the surface colour into the background
-    /// plane and touches nothing else: not the glyph, not the colour plane and
-    /// not the depth buffer, because no glyph was drawn and a cell with no
-    /// glyph in it has never occluded anything.
-    ///
-    /// **A cell that has a character on it keeps that character's own
-    /// background, and this will not take it.** A blank in this renderer means
-    /// "see through to whatever is behind", not "an opaque black hole" — a
-    /// facade too dark to draw lets the tower behind it through, and always
-    /// has. So the surface a cell is painted in has to be the surface the
-    /// character on it came from, or the two disagree and the character floats
-    /// over a colour that is not its own. The depth test is the same one `put`
-    /// makes, against the same buffer.
-    #[inline]
-    fn put_bg(&mut self, x: i32, y: i32, rgb: [u8; 3], d: f32) {
-        if !self.shade || x < 0 || y < 0 || x >= self.cols as i32 || y >= self.rows as i32 {
-            return;
-        }
-        let i = y as usize * self.cols + x as usize;
-        if self.ch[i] != b' ' || d > self.depth[i] {
-            return;
-        }
-        let s = crate::palette::shade(rgb, b' ');
-        self.bg[i * 3] = s[0];
-        self.bg[i * 3 + 1] = s[1];
-        self.bg[i * 3 + 2] = s[2];
-        self.has_bg = true;
-    }
-
-    /// One whole row of background, shaded once and written straight in.
-    ///
-    /// The sky is the one surface that is the same colour all the way across a
-    /// row and is drawn before anything else, so it needs neither a per-cell
-    /// shade nor a depth test — and it covers up to half the frame, which is
-    /// exactly where neither is worth paying for.
-    fn bg_row(&mut self, y: i32, rgb: [u8; 3]) {
-        if !self.shade || y < 0 || y >= self.rows as i32 {
-            return;
-        }
-        let s = crate::palette::shade(rgb, b' ');
-        let row = y as usize * self.cols;
-        for i in row..row + self.cols {
-            self.bg[i * 3] = s[0];
-            self.bg[i * 3 + 1] = s[1];
-            self.bg[i * 3 + 2] = s[2];
-        }
-        self.has_bg = true;
-    }
-
-    /// Is this cell part of a plate?
-    #[inline]
-    pub fn is_plate(&self, x: i32, y: i32) -> bool {
-        if !self.has_plates {
-            return false;
-        }
-        if x < 0 || y < 0 || x >= self.cols as i32 || y >= self.rows as i32 {
-            return false;
-        }
-        self.plate[y as usize * self.cols + x as usize] != 0
-    }
-
-    /// Is every cell of this horizontal run on screen and in front of whatever
-    /// is already drawn there?
-    ///
-    /// A registration plate is drawn all or not at all. Half a plate — clipped
-    /// by a building corner, or by a car passing in front of it — reads as a
-    /// SHORTER REGISTRATION, which is worse than no plate: `1 RG` behind
-    /// another car came out as `1 R`. When the whole run cannot be drawn the
-    /// caller falls back to the blank panel, which can be occluded as much as
-    /// it likes and still says only "a plate".
-    #[inline]
-    /// What the depth buffer holds at this cell. Used by the fascia pass to
-    /// find out whether the band it just drew actually won its cell.
-    fn depth_at(&self, x: i32, y: i32) -> f32 {
-        if x < 0 || y < 0 || x >= self.cols as i32 || y >= self.rows as i32 {
-            return -1.0;
-        }
-        self.depth[y as usize * self.cols + x as usize]
-    }
-
-    #[inline]
-    fn run_is_clear(&self, x: i32, y: i32, n: i32, d: f32) -> bool {
-        if y < 0 || y >= self.rows as i32 || x < 0 || x + n > self.cols as i32 {
-            return false;
-        }
-        let row = y as usize * self.cols;
-        (0..n as usize).all(|i| d <= self.depth[row + x as usize + i])
-    }
-
-    /// The same as `put`, and it marks the cell as belonging to a plate. An
-    /// ordinary glyph in an ordinary colour — the mark is bookkeeping, not
-    /// paint, and nothing in any of the three output paths reads it.
-    #[inline]
-    fn put_plate(&mut self, x: i32, y: i32, ch: u8, rgb: [u8; 3], d: f32) {
-        if x < 0 || y < 0 || x >= self.cols as i32 || y >= self.rows as i32 {
-            return;
-        }
-        let i = y as usize * self.cols + x as usize;
-        if d > self.depth[i] {
-            return;
-        }
-        self.ch[i] = ch;
-        self.depth[i] = d;
-        self.rgb[i * 3] = rgb[0];
-        self.rgb[i * 3 + 1] = rgb[1];
-        self.rgb[i * 3 + 2] = rgb[2];
-        self.has_plates = true;
-        self.plate[i] = 1;
-    }
-
-    /// Pack into the flat frame buffer the frontends read: 4 bytes per cell,
-    /// `[glyph, r, g, b]`, row-major. One buffer, one copy, no object graph.
-    pub fn pack_into(&self, out: &mut Vec<u8>) {
-        out.clear();
-        out.reserve(self.cols * self.rows * 4);
-        for i in 0..self.cols * self.rows {
-            out.push(self.ch[i]);
-            out.push(self.rgb[i * 3]);
-            out.push(self.rgb[i * 3 + 1]);
-            out.push(self.rgb[i * 3 + 2]);
-        }
-    }
-}
 
 pub struct Renderer {
     /// Nearest wall distance per column, for depth-testing the population.
@@ -1167,10 +958,7 @@ impl Renderer {
                     glyph = b':';
                     colour = hsl(hue, 35.0, 16.0 + 14.0 * b);
                 } else {
-                    let idx = ((WALL_RAMP.len() - 1) as f32 * (1.0 - b)
-                        + 0.55 * (sn - 0.5))
-                        .round()
-                        .clamp(0.0, (WALL_RAMP.len() - 1) as f32) as usize;
+                    let idx = ascii_engine::ramp::index(WALL_RAMP.len(), b, 0.55 * (sn - 0.5));
                     glyph = WALL_RAMP[idx];
                     colour = hsl(hue, sat, 38.0 + 26.0 * b);
                 }

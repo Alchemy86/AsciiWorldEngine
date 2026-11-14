@@ -1,12 +1,12 @@
 //! Deterministic hashing and a tiny RNG. No dependencies, no global state.
 //!
-//! Two *different* kinds of randomness are used by the renderer and they are
-//! not interchangeable (see ARCHITECTURE.md, "Two kinds of noise"):
+//! Two *different* kinds of randomness serve a renderer and they are not
+//! interchangeable:
 //!
 //!   * `noise()` — a hash of integer lattice coordinates. Per-cell brightness
-//!     dither, star fields, sign placement.
-//!   * the ordered Bayer dither in `palette::surf_tex` — surface texture.
-//!     Substituting hash noise there turns every facade into speckle.
+//!     jitter, star fields, scattered placement.
+//!   * the ordered dither in `dither::DITHER` — surface texture. Substituting
+//!     hash noise there turns every regular pattern into speckle.
 
 /// xorshift64*, for one-shot world generation.
 pub struct Rng {
